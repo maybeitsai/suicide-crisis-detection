@@ -1,3 +1,5 @@
 /data
 *directml*
 __pycache__
+docker-compose.yml
+Dockerfile
