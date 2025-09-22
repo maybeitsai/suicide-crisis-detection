@@ -1,0 +1,11 @@
+[project]
+name = "robot-pencegah-bunuh-diri"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy==1.26.4",
+    "opencv-python==4.10.0.84",
+    "torch-directml==0.2.3.dev240715",
+]
