@@ -3,7 +3,7 @@ import time
 import torch
 import numpy as np
 from torchvision import transforms
-from models.load_models import face_expression_model
+from module.models import face_expression_model
 from PIL import Image
 
 # ======================
