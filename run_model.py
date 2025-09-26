@@ -1,6 +1,7 @@
 import cv2
 import time
 import torch
+import platform
 import numpy as np
 import mediapipe as mp
 from torchvision import transforms
@@ -39,8 +40,13 @@ print(f"[INFO] Mode awal: {mode.upper()}")
 # ======================
 # Kamera (auto detection)
 # ======================
-def get_available_camera(max_index=10):
-    backends = [cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_VFW, cv2.CAP_ANY]
+def get_available_camera(max_index=5):
+    system = platform.system()
+    if system == "Windows":
+        backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_VFW, cv2.CAP_ANY]
+    else:  # Linux / macOS
+        backends = [cv2.CAP_V4L2, cv2.CAP_ANY]
+
     for i in range(max_index):
         for backend in backends:
             cap = cv2.VideoCapture(i, backend)
@@ -122,130 +128,140 @@ prev_time = time.time()
 last_pred = None
 last_conf = 0.0
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    # --- Selalu deteksi sesuai mode ---
-    faces, bodies = [], []
-    if mode in ["face", "fusion"]:
-        faces = face_cascade.detectMultiScale(
-            gray,
-            scaleFactor=1.13333,
-            minNeighbors=7,
-            minSize=(128, 128)
-        )
-    if mode in ["pose", "fusion"]:
-        bodies = upperbody_cascade.detectMultiScale(
-            gray,
-            scaleFactor=1.01618,
-            minNeighbors=5,
-            minSize=(256, 256)
-        )
-            # --- Tambahan: Pose Estimation dengan MediaPipe ---
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = pose_estimator.process(rgb_frame)
-
-        if results.pose_landmarks:
-            mp_drawing.draw_landmarks(
-                frame,
-                results.pose_landmarks,
-                mp_pose.POSE_CONNECTIONS,
-                landmark_drawing_spec=mp_drawing.DrawingSpec(color=(0,255,255), thickness=2, circle_radius=2),
-                connection_drawing_spec=mp_drawing.DrawingSpec(color=(0,0,255), thickness=2, circle_radius=2)
-            )
+try:
+    while True:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            print("[WARN] Gagal baca frame dari kamera.")
+            continue
 
 
-    # Gambar box deteksi
-    for (x, y, w, h) in faces:
-        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-    for (x, y, w, h) in bodies:
-        cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    curr_time = time.time()
-
-    # --- Prediksi setiap 1.618 detik ---
-    if curr_time - prev_time >= 1.618:
-        face_probs, pose_probs = None, None
-
-        # Prediksi wajah
+        # --- Selalu deteksi sesuai mode ---
+        faces, bodies = [], []
         if mode in ["face", "fusion"]:
-            for (x, y, w, h) in faces:
-                pad = int(0.1 * w)
-                x1, y1 = max(0, x+pad), max(0, y+pad)
-                x2, y2 = min(frame.shape[1], x+w-pad), min(frame.shape[0], y+h-pad)
-                face_crop = frame[y1:y2, x1:x2]
-                if face_crop.size > 0:
-                    inp = preprocess(face_crop, face_tf)
-                    with torch.no_grad():
-                        outputs = face_model(inp)
-                        face_probs = torch.softmax(outputs, dim=1).cpu().numpy()[0]
-
-        # Prediksi pose
+            faces = face_cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.13333,
+                minNeighbors=7,
+                minSize=(128, 128)
+            )
         if mode in ["pose", "fusion"]:
-            for (x, y, w, h) in bodies:
-                body_crop = frame[y:y+h, x:x+w]
-                if body_crop.size > 0:
-                    inp = preprocess(body_crop, pose_tf)
-                    with torch.no_grad():
-                        outputs = pose_model(inp)
-                        pose_probs = torch.softmax(outputs, dim=1).cpu().numpy()[0]
+            bodies = upperbody_cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.01618,
+                minNeighbors=5,
+                minSize=(256, 256)
+            )
+                # --- Tambahan: Pose Estimation dengan MediaPipe ---
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            try:
+                results = pose_estimator.process(rgb_frame)
+            except Exception as e:
+                print("[ERROR] MediaPipe crash:", e)
+                results = None
 
-        # Fusion / Single
-        if mode == "fusion":
-            if face_probs is not None or pose_probs is not None:
-                probs_final = np.zeros(2)
-                if face_probs is not None:
-                    probs_final += w_face * face_probs
-                if pose_probs is not None:
-                    probs_final += w_pose * pose_probs
-                pred = np.argmax(probs_final)
+
+            if results.pose_landmarks:
+                mp_drawing.draw_landmarks(
+                    frame,
+                    results.pose_landmarks,
+                    mp_pose.POSE_CONNECTIONS,
+                    landmark_drawing_spec=mp_drawing.DrawingSpec(color=(0,255,255), thickness=2, circle_radius=2),
+                    connection_drawing_spec=mp_drawing.DrawingSpec(color=(0,0,255), thickness=2, circle_radius=2)
+                )
+
+
+        # Gambar box deteksi
+        for (x, y, w, h) in faces:
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        for (x, y, w, h) in bodies:
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
+
+        curr_time = time.time()
+
+        # --- Prediksi setiap 1.618 detik ---
+        if curr_time - prev_time >= 1.618:
+            face_probs, pose_probs = None, None
+
+            # Prediksi wajah
+            if mode in ["face", "fusion"]:
+                for (x, y, w, h) in faces:
+                    pad = int(0.1 * w)
+                    x1, y1 = max(0, x+pad), max(0, y+pad)
+                    x2, y2 = min(frame.shape[1], x+w-pad), min(frame.shape[0], y+h-pad)
+                    face_crop = frame[y1:y2, x1:x2]
+                    if face_crop.size > 0:
+                        inp = preprocess(face_crop, face_tf)
+                        with torch.no_grad():
+                            outputs = face_model(inp)
+                            face_probs = torch.softmax(outputs, dim=1).cpu().numpy()[0]
+
+            # Prediksi pose
+            if mode in ["pose", "fusion"]:
+                for (x, y, w, h) in bodies:
+                    body_crop = frame[y:y+h, x:x+w]
+                    if body_crop.size > 0:
+                        inp = preprocess(body_crop, pose_tf)
+                        with torch.no_grad():
+                            outputs = pose_model(inp)
+                            pose_probs = torch.softmax(outputs, dim=1).cpu().numpy()[0]
+
+            # Fusion / Single
+            if mode == "fusion":
+                if face_probs is not None or pose_probs is not None:
+                    probs_final = np.zeros(2)
+                    if face_probs is not None:
+                        probs_final += w_face * face_probs
+                    if pose_probs is not None:
+                        probs_final += w_pose * pose_probs
+                    pred = np.argmax(probs_final)
+                    last_pred = labels[pred]
+                    last_conf = probs_final[pred]
+
+            elif mode == "face" and face_probs is not None:
+                pred = np.argmax(face_probs)
                 last_pred = labels[pred]
-                last_conf = probs_final[pred]
+                last_conf = face_probs[pred]
 
-        elif mode == "face" and face_probs is not None:
-            pred = np.argmax(face_probs)
-            last_pred = labels[pred]
-            last_conf = face_probs[pred]
+            elif mode == "pose" and pose_probs is not None:
+                pred = np.argmax(pose_probs)
+                last_pred = labels[pred]
+                last_conf = pose_probs[pred]
+                print(pred, last_conf)
 
-        elif mode == "pose" and pose_probs is not None:
-            pred = np.argmax(pose_probs)
-            last_pred = labels[pred]
-            last_conf = pose_probs[pred]
-            print(pred, last_conf)
+            prev_time = curr_time  # reset timer
 
-        prev_time = curr_time  # reset timer
+        # --- Selalu tampilkan hasil terakhir ---
+        if last_pred is not None:
+            label = f"{last_pred} ({last_conf:.2f}) | MODE: {mode.upper()}"
+            color = colors[last_pred]
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+            x, y = 10, 40
+            cv2.rectangle(frame, (x-5, y-th-5), (x+tw+5, y+5), color, -1)
+            cv2.putText(frame, label, (x, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255,255,255), 2)
 
-    # --- Selalu tampilkan hasil terakhir ---
-    if last_pred is not None:
-        label = f"{last_pred} ({last_conf:.2f}) | MODE: {mode.upper()}"
-        color = colors[last_pred]
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
-        x, y = 10, 40
-        cv2.rectangle(frame, (x-5, y-th-5), (x+tw+5, y+5), color, -1)
-        cv2.putText(frame, label, (x, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255,255,255), 2)
+        cv2.imshow("Fusion: Face + Pose Recognition", frame)
 
-    cv2.imshow("Fusion: Face + Pose Recognition", frame)
-
-    # ======================
-    # Keyboard control
-    # ======================
-    key = cv2.waitKey(1) & 0xFF
-    if key == ord('q'):   # keluar
-        break
-    elif key == ord('f'):
-        mode = "face"
-        print("[INFO] Mode diganti ke: FACE")
-    elif key == ord('p'):
-        mode = "pose"
-        print("[INFO] Mode diganti ke: POSE")
-    elif key == ord('o'):
-        mode = "fusion"
-        print("[INFO] Mode diganti ke: FUSION")
+        # ======================
+        # Keyboard control
+        # ======================
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):   # keluar
+            break
+        elif key == ord('f'):
+            mode = "face"
+            print("[INFO] Mode diganti ke: FACE")
+        elif key == ord('p'):
+            mode = "pose"
+            print("[INFO] Mode diganti ke: POSE")
+        elif key == ord('o'):
+            mode = "fusion"
+            print("[INFO] Mode diganti ke: FUSION")
+except Exception as e:
+    print("[FATAL ERROR]", e)
 
 cap.release()
 cv2.destroyAllWindows()
