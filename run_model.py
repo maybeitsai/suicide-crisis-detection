@@ -41,7 +41,7 @@ print(f"[INFO] Mode awal: {mode.upper()}")
 # ======================
 def get_available_camera(max_index=10):
     backends = [cv2.CAP_MSMF, cv2.CAP_DSHOW, cv2.CAP_VFW, cv2.CAP_ANY]
-    for i in range(1, max_index):
+    for i in range(max_index):
         for backend in backends:
             cap = cv2.VideoCapture(i, backend)
             if cap.isOpened():
