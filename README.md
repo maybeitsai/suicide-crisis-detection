@@ -36,8 +36,9 @@ cd "suicide-crisis-detection"
 # Install dependencies dengan UV
 uv sync
 
-# Jalankan sistem deteksi
-python run_model.py
+# Jalankan sistem deteksi (pilih sesuai platform):
+python run_model.py        # CPU/GPU (Windows/Linux/macOS)
+python run_model_hailo.py  # Hailo AI Hat+ (Raspberry Pi 5)
 
 # Kontrol keyboard:
 F = Face mode | P = Pose mode | O = Fusion mode | Q = Quit
@@ -50,6 +51,60 @@ F = Face mode | P = Pose mode | O = Fusion mode | Q = Quit
 - **OpenCV** - Computer Vision
 - **Torchvision** - Pre-trained Models
 - **UV Package Manager** - Dependency Management
+- **ONNX Runtime** - Cross-platform ML inference
+- **Hailo SDK** - Hardware acceleration untuk Hailo AI processors
+- **MediaPipe** - Pose estimation dan computer vision
+
+## 🚀 Hardware Acceleration & Deployment Options
+
+Proyek ini mendukung berbagai platform dengan optimasi khusus untuk performa maksimal:
+
+### 🖥️ **CPU Inference (Universal)**
+
+```bash
+python run_model.py
+```
+
+- **Platform**: Windows, Linux, macOS
+- **Model Format**: PyTorch (.pt)
+- **Performa**: Good for development & testing
+- **Requirements**: Intel/AMD x64 atau ARM64
+
+### 🎮 **GPU Acceleration (CUDA)**
+
+```bash
+# Otomatis terdeteksi jika CUDA tersedia
+python run_model.py
+```
+
+- **Platform**: Windows, Linux dengan GPU NVIDIA
+- **Model Format**: PyTorch (.pt)
+- **Performa**: ~3-5x lebih cepat dari CPU
+- **Requirements**: CUDA-compatible GPU
+
+### ⚡ **Hailo AI Hat+ (Raspberry Pi 5)**
+
+```bash
+python run_model_hailo.py
+```
+
+- **Platform**: Raspberry Pi 5 + Hailo AI Hat+
+- **Model Format**: HEF (Hailo Executable Format)
+- **Performa**: ~26 TOPS AI processing power
+- **Requirements**: Raspberry Pi 5, Hailo AI Hat+, HailoRT SDK
+
+### 🌐 **ONNX Runtime (Cross-Platform)**
+
+- **Model Format**: ONNX (.onnx)
+- **Platform**: Semua platform dengan ONNX Runtime
+- **Performa**: Optimized untuk production deployment
+- **Benefit**: Platform-agnostic deployment
+
+### 🔧 **HAR Format (Hailo Archive)**
+
+- **Model Format**: HAR (Hailo Archive)
+- **Purpose**: Intermediate format untuk kompilasi ke HEF
+- **Variants**: Standard (.har) dan Optimized (-opt.har)
 
 ## 📦 Instalasi
 
@@ -93,14 +148,110 @@ F = Face mode | P = Pose mode | O = Fusion mode | Q = Quit
    source .venv/bin/activate
    ```
 
+### 🍓 **Instalasi Khusus Raspberry Pi 5 + Hailo AI Hat+**
+
+**Prerequisites:**
+
+1. **Raspberry Pi 5** dengan **8GB RAM** (recommended)
+2. **Hailo AI Hat+** terpasang dengan benar
+3. **Raspberry Pi OS 64-bit** atau **Ubuntu 22.04 LTS**
+
+**Langkah instalasi:**
+
+1. **Setup Raspberry Pi 5**
+
+   ```bash
+   # Update sistem
+   sudo apt update && sudo apt upgrade -y
+
+   # Install dependencies
+   sudo apt install -y python3-pip python3-venv git cmake
+   ```
+
+2. **Install Hailo SDK**
+
+   ```bash
+   # Download dan install HailoRT
+   wget https://hailo.ai/downloads/hailort-4.20.0-linux.deb
+   sudo dpkg -i hailort-4.20.0-linux.deb
+
+   # Install Python bindings
+   pip install hailort
+   ```
+
+3. **Verifikasi Hailo device**
+
+   ```bash
+   # Check Hailo device detection
+   hailortcli scan
+
+   # Test model loading (opsional)
+   hailortcli run models/hef/face-expression/face-expression.hef
+   ```
+
+4. **Clone dan setup project**
+
+   ```bash
+   git clone https://github.com/maybeitsai/suicide-crisis-detection.git
+   cd suicide-crisis-detection
+
+   # Install dependencies (tanpa CUDA packages)
+   uv sync --no-dev
+   ```
+
+5. **Test installation**
+   ```bash
+   python run_model_hailo.py
+   ```
+
 ## 🎯 Cara Penggunaan
 
 ### 🚀 Menjalankan Sistem Deteksi Real-time
 
-#### Langkah Dasar
+#### Langkah Dasar - CPU/GPU Inference
 
 ```bash
 python run_model.py
+```
+
+#### 🔥 Hailo AI Hat+ Acceleration (Raspberry Pi 5)
+
+**Prerequisites untuk Raspberry Pi 5:**
+
+```bash
+# Install Hailo SDK dan dependencies
+sudo apt update
+sudo apt install hailo-all
+
+# Verifikasi instalasi Hailo
+hailortcli fw-control identify
+```
+
+**Menjalankan dengan Hailo acceleration:**
+
+```bash
+python run_model_hailo.py
+```
+
+**Fitur khusus Hailo mode:**
+
+- ⚡ **26 TOPS** AI processing power
+- 🔋 **Low power** consumption (~2W)
+- 🎯 **Dedicated inference** - tidak mengganggu CPU utama
+- 📊 **Real-time performance** - konsisten 30+ FPS
+- 🌡️ **Thermal efficient** - pengelolaan panas optimal
+
+**Troubleshooting Hailo:**
+
+```bash
+# Check Hailo device status
+lsusb | grep Hailo
+
+# Monitor Hailo performance
+sudo hailortcli monitor --rate 1000
+
+# Reset Hailo device jika diperlukan
+sudo hailortcli reset
 ```
 
 #### 🎮 Kontrol Keyboard Interaktif
@@ -160,10 +311,28 @@ Setelah menjalankan program, gunakan keyboard untuk mengontrol mode deteksi:
 
 **Hardware Requirements:**
 
+#### 🖥️ **Desktop/Laptop (CPU/GPU)**
+
 - **CPU**: Intel i5 atau AMD Ryzen 5 (minimum)
 - **RAM**: 8GB (minimum), 16GB (recommended)
 - **GPU**: CUDA-compatible (optional, untuk performa lebih cepat)
 - **Camera**: Webcam atau kamera eksternal (minimum 720p)
+
+#### 🍓 **Raspberry Pi 5 + Hailo AI Hat+**
+
+- **SBC**: Raspberry Pi 5 (4GB/8GB RAM)
+- **AI Accelerator**: Hailo AI Hat+ (Hailo-8L processor)
+- **Storage**: MicroSD 32GB+ (Class 10) atau NVMe SSD
+- **Power**: 5V/5A USB-C adapter (untuk Hailo + RPi5)
+- **Camera**: RPi Camera Module v3 atau USB camera
+- **OS**: Raspberry Pi OS (64-bit) atau Ubuntu 22.04 LTS
+- **SDK**: HailoRT v4.20+ dan Hailo Dataflow Compiler
+
+#### 🌐 **Edge Deployment (ONNX)**
+
+- **Platforms**: x86_64, ARM64, ARMv7
+- **RAM**: 4GB+ (tergantung platform)
+- **Runtime**: ONNX Runtime 1.15+
 
 #### 📊 Output Interface
 
@@ -261,13 +430,31 @@ jupyter notebook pose-recognition.ipynb
 ## 📁 Struktur Proyek
 
 ```
-├── run_model.py           # Script utama untuk menjalankan sistem
+├── run_model.py           # Script utama untuk CPU/GPU inference
+├── run_model_hailo.py     # Script khusus untuk Hailo AI Hat+ (RPi5)
 ├── pyproject.toml         # Konfigurasi proyek dan dependencies
 ├── face-expression.ipynb  # Notebook analisis ekspresi wajah
 ├── pose-recognition.ipynb # Notebook analisis pose tubuh
-├── models/               # Model AI yang telah dilatih
-│   ├── face-expression.pt
-│   └── pose-recognition.pt
+├── models/               # Model AI dalam berbagai format
+│   ├── face-expression.pt              # PyTorch model (CPU/GPU)
+│   ├── face-expression-directml.pt     # DirectML optimized
+│   ├── pose-recognition.pt             # PyTorch model (CPU/GPU)
+│   ├── pose-recognition-directml.pt    # DirectML optimized
+│   ├── onnx/                          # ONNX format (cross-platform)
+│   │   ├── face-expression.onnx
+│   │   └── pose-recognition.onnx
+│   ├── har/                           # Hailo Archive format
+│   │   ├── face-expression.har        # Standard HAR
+│   │   ├── face-expression-opt.har    # Optimized HAR
+│   │   ├── pose-recognition.har       # Standard HAR
+│   │   └── pose-recognition-opt.har   # Optimized HAR
+│   └── hef/                           # Hailo Executable Format
+│       ├── face-expression/
+│       │   ├── face-expression.hef    # Compiled for Hailo-8L
+│       │   └── face-expression_compiled.har
+│       └── pose-recognition/
+│           ├── pose-recognition.hef   # Compiled for Hailo-8L
+│           └── pose-recognition_compiled.har
 ├── module/               # Modul utama
 │   ├── models.py         # Definisi model AI
 │   └── utils.py          # Fungsi utilitas
@@ -275,6 +462,16 @@ jupyter notebook pose-recognition.ipynb
     ├── 1. DATA EKSPRESI WAJAH KRISI BUNUH DIRI/
     └── 2. SKENARIO PSIKOLOGI REMAJA/
 ```
+
+### 🔍 **Penjelasan Format Model**
+
+| Format       | Extension      | Platform         | Keterangan                                 |
+| ------------ | -------------- | ---------------- | ------------------------------------------ |
+| **PyTorch**  | `.pt`          | CPU, CUDA GPU    | Format native untuk development & training |
+| **DirectML** | `-directml.pt` | Windows DirectML | Optimized untuk GPU Windows                |
+| **ONNX**     | `.onnx`        | Universal        | Cross-platform deployment                  |
+| **HAR**      | `.har`         | Hailo Platform   | Archive format untuk kompilasi             |
+| **HEF**      | `.hef`         | Hailo AI Hat+    | Executable format untuk inference          |
 
 ## 🔧 Konfigurasi
 
@@ -296,7 +493,16 @@ Proyek ini menggunakan dataset khusus yang berisi:
 
 - **Model**: MobileNetV3 (Large & Small variants)
 - **Akurasi**: Optimized untuk deteksi real-time
-- **Latency**: Low-latency inference untuk aplikasi real-time
+- **Latency**: Low-latency inference untuk aplikasi real-time|
+
+### 🎯 **Hailo AI Hat+ Advantages**
+
+- ⚡ **26 TOPS** dedicated AI processing
+- 🔋 **Power efficient** - hanya 2W untuk AI processing
+- 🚀 **Consistent performance** - tidak terpengaruh CPU load
+- 🌡️ **Cool operation** - thermal management terintegrasi
+- 💰 **Cost effective** - performa tinggi dengan harga terjangkau
+- 🔧 **Easy integration** - plug-and-play dengan Raspberry Pi 5
 
 ## 🤝 Kontribusi
 
