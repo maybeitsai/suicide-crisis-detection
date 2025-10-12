@@ -273,11 +273,11 @@ def main_loop(pipelines: Dict[str, HailoPipeline]):
             faces, bodies = [], []
             if mode in ("face", "fusion"):
                 faces = face_cascade.detectMultiScale(
-                    gray, scaleFactor=1.133, minNeighbors=7, minSize=(48,48)
+                    gray, scaleFactor=1.1382, minNeighbors=7, minSize=(128,128)
                 )
             if mode in ("pose", "fusion"):
                 bodies = upperbody_cascade.detectMultiScale(
-                    gray, scaleFactor=1.016, minNeighbors=5, minSize=(128,128)
+                    gray, scaleFactor=1.01618, minNeighbors=5, minSize=(256,256)
                 )
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 try:

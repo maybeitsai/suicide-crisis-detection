@@ -144,7 +144,7 @@ try:
         if mode in ["face", "fusion"]:
             faces = face_cascade.detectMultiScale(
                 gray,
-                scaleFactor=1.13333,
+                scaleFactor=1.1382,
                 minNeighbors=7,
                 minSize=(128, 128)
             )
