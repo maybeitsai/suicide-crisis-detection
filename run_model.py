@@ -82,7 +82,6 @@ pose_estimator = mp_pose.Pose(
     min_tracking_confidence=0.5
 )
 
-
 # ======================
 # Transforms
 # ======================
@@ -115,7 +114,7 @@ def preprocess(img, transform):
 # ======================
 # Labels & Fusion weights
 # ======================
-labels = ["KRISIS", "TIDAK KRISIS"]
+labels = ["TIDAK KRISIS", "KRISIS"]
 colors = {
     "TIDAK KRISIS": (0, 128, 0),  # hijau gelap
     "KRISIS": (0, 0, 255)         # merah

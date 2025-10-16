@@ -237,6 +237,19 @@ def speak_text(text):
         engine = pyttsx3.init()
         engine.setProperty("rate", 160)
         engine.setProperty("volume", 1.0)
+
+        voices = engine.getProperty('voices')
+        voice_id = None
+        for v in voices:
+            if "Andika" in v.name or "Indonesian" in v.name or "Indonesia" in v.name:
+                voice_id = v.id
+                break
+
+        if voice_id:
+            engine.setProperty('voice', voice_id)
+        else:
+            print("⚠️ Indonesian voice not found, using default voice")
+
         engine.say(text)
         engine.runAndWait()
     threading.Thread(target=run, daemon=True).start()

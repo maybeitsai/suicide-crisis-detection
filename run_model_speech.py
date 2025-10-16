@@ -87,10 +87,16 @@ def speak_text(text):
         engine.setProperty("rate", 160)
         engine.setProperty("volume", 1.0)
         voices = engine.getProperty("voices")
+        indo_voice_id = None
         for v in voices:
-            if "indonesia" in v.name.lower() or "id" in v.id.lower():
-                engine.setProperty("voice", v.id)
+            if "Andika" in v.name or "Indonesian" in v.name or "Indonesia" in v.name:
+                indo_voice_id = v.id
                 break
+        if indo_voice_id:
+            engine.setProperty("voice", indo_voice_id)
+        else:
+            print("⚠️ Voice bahasa Indonesia tidak ditemukan, menggunakan default.")
+            
         engine.say(text)
         engine.runAndWait()
     threading.Thread(target=run, daemon=True).start()
