@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-run_model_hailo.py
-Versi kompatibel HailoRT v4.20 (Raspberry Pi 5 + Hailo-8L)
-- Face-expression HEF (48x48)
-- Pose-recognition HEF (224x224)
-FIXED: Menggunakan ConfiguredNetworkGroup untuk InferVStreams
+run_model_fusion.py
+Fusion of Hailo (face + pose) models and speech model
+Weight: speech 0.4, pose 0.3, face 0.3
 """
 
 import os
@@ -12,8 +10,12 @@ os.environ["OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
 import time
 import platform
 import logging
-from typing import Dict, Any, Tuple, List
 import contextlib
+import threading
+import re
+import random
+
+from typing import Dict, Any, Tuple, List
 
 import cv2
 import numpy as np
@@ -21,7 +23,13 @@ from PIL import Image
 from torchvision import transforms
 import mediapipe as mp
 
-# Hailo imports (versi 4.20+)
+# ===== Speech imports =====
+import joblib
+import speech_recognition as sr
+import pyttsx3
+import pandas as pd
+
+# Hailo imports
 from hailo_platform import (
     HEF,
     VDevice,
@@ -41,9 +49,9 @@ HEF_POSE = "models/hef/pose-recognition/pose-recognition.hef"
 FACE_INPUT_SIZE = 48
 POSE_INPUT_SIZE = 224
 
-LABELS = ["KRISIS", "TIDAK KRISIS"]  # pastikan urutan sesuai model
+LABELS = ["TIDAK KRISIS", "KRISIS"]
 COLORS = {"TIDAK KRISIS": (0,128,0), "KRISIS": (0,0,255)}
-W_FACE, W_POSE = 0.6, 0.4
+W_FACE, W_POSE, W_SPEECH = 0.3, 0.3, 0.4
 
 # ===== TRANSFORMS =====
 class To3Channels:
@@ -69,12 +77,11 @@ pose_tf = transforms.Compose([
 # ===== HAILO HELPERS =====
 class HailoPipeline:
     def __init__(self, net_group, input_vstreams_params, output_vstreams_params, input_infos, output_infos):
-        self.net_group = net_group  # ConfiguredNetworkGroup
+        self.net_group = net_group
         self.input_vstreams_params = input_vstreams_params
         self.output_vstreams_params = output_vstreams_params
         self.input_infos = input_infos
         self.output_infos = output_infos
-        # store input/output names for convenience
         self.input_names = [info.name for info in input_infos]
         self.output_names = [info.name for info in output_infos]
 
@@ -95,14 +102,12 @@ def initialize_vdevice_and_pipelines(hef_paths: List[str]) -> Tuple[VDevice, Dic
             raise FileNotFoundError(f"HEF tidak ditemukan: {hef_path}")
         hef = HEF(hef_path)
 
-        # configure() (v4.20) returns network_groups list
         network_groups = vdevice.configure(hef)
         if not network_groups:
             raise RuntimeError("vdevice.configure returned empty network_groups")
         net_group = network_groups[0]  # ConfiguredNetworkGroup
         logging.info("Network group ready for HEF: %s", os.path.basename(hef_path))
 
-        # ===== create input/output vstream params using helper =====
         input_vstreams_params = InputVStreamParams.make_from_network_group(
             net_group, quantized=False, format_type=FormatType.FLOAT32
         )
@@ -110,13 +115,11 @@ def initialize_vdevice_and_pipelines(hef_paths: List[str]) -> Tuple[VDevice, Dic
             net_group, quantized=False, format_type=FormatType.FLOAT32
         )
 
-        # Convert to dict if needed
         if not isinstance(input_vstreams_params, dict):
             input_vstreams_params = {p.name: p for p in input_vstreams_params}
         if not isinstance(output_vstreams_params, dict):
             output_vstreams_params = {p.name: p for p in output_vstreams_params}
 
-        # get info lists (info objects)
         input_infos = net_group.get_input_vstream_infos()
         output_infos = net_group.get_output_vstream_infos()
 
@@ -140,19 +143,15 @@ def hailo_infer(pipeline: HailoPipeline, inp_array: np.ndarray) -> np.ndarray:
         raise RuntimeError("Pipeline tidak memiliki input stream")
     
     in_name = pipeline.input_names[0]
-    # ensure contiguous float32
     inp = np.ascontiguousarray(inp_array.astype(np.float32))
     inputs = {in_name: inp}
     
-    # FIXED: Gunakan ConfiguredNetworkGroup langsung dengan aktivasi di dalam InferVStreams
-    # InferVStreams akan handle aktivasi secara internal
     with InferVStreams(pipeline.net_group, 
                       pipeline.input_vstreams_params, 
                       pipeline.output_vstreams_params) as infer:
         with pipeline.net_group.activate():
             outputs = infer.infer(inputs)
     
-    # grab first output
     out_name = pipeline.output_names[0]
     out = outputs[out_name]
     return np.array(out).reshape(-1)
@@ -165,17 +164,115 @@ def softmax(x: np.ndarray) -> np.ndarray:
 def preprocess(img_bgr: np.ndarray, transform) -> np.ndarray:
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     pil = Image.fromarray(img_rgb)
-    tensor = transform(pil).unsqueeze(0)  # (1,C,H,W)
+    tensor = transform(pil).unsqueeze(0)
     arr = tensor.numpy().astype(np.float32)
-    arr = np.transpose(arr, (0, 2, 3, 1))  # -> NHWC
+    arr = np.transpose(arr, (0, 2, 3, 1))
     return arr
+
+# ===== SPEECH RECOGNITION SECTION =====
+vectorizer = joblib.load("models/language/vectorizer.pkl")
+speech_model = joblib.load("models/language/lgbm_model.pkl")
+with open("models/language/threshold.txt", "r") as f:
+    speech_threshold = float(f.read().strip())
+
+df_krisis = pd.read_excel("data/csv/Data_tanggapan_positif.xlsx", sheet_name="Krisis")
+df_tidak = pd.read_excel("data/csv/Data_tanggapan_positif.xlsx", sheet_name="Tidak Krisis")
+
+def preprocess_text(s):
+    s = str(s).lower()
+    s = re.sub(r'[^0-9a-z\s]', ' ', s)
+    s = re.sub(r'\s+', ' ', s)
+    return s.strip()
+
+CRISIS_KEYWORDS = [preprocess_text(k) for k in [
+    # ✨ Frasa langsung
+    "bunuh diri", "saya mau mati", "saya mati", "bunuh", "ingin mati", "ingin bunuh diri",
+    "tidak ingin hidup", "sudah tidak kuat", "sudah tidak sanggup",
+    "mati saja", "selesai saja", "akhiri hidup", "putus asa",
+    "menyakiti diri", "mengakhiri hidup", "sudah tidak ada harapan",
+    "sudah ingin mati", "capek hidup",
+
+    # 💔 Variasi penulisan & ejaan
+    "gw mau mati", "gue mau mati", "pengen mati", "pgn mati", "pingin mati",
+    "udah ga kuat", "gak kuat lagi", "gk kuat", "ga kuat",
+    "cape hidup", "capee hidup", "udah cape", "sudah capek",
+    "gak sanggup lagi", "udah nyerah", "nyerah aja",
+
+    # 🥀 Kalimat tidak langsung
+    "hidup gak ada artinya", "hidup gak guna", "hidup sia sia",
+    "aku pengen hilang", "ingin hilang", "pengen ngilang", "ingin pergi selamanya",
+    "mending mati", "lebih baik mati", "biar aku mati aja",
+    "ingin tidur selamanya", "ingin berhenti hidup",
+
+    # ⚠️ Perilaku menyakiti diri
+    "lukai diri", "melukai diri", "sayat", "nyakitin diri", "self harm",
+    "aku menyakiti diri", "aku pengen nyakitin diri", "pengen sayat",
+    "pengen nyakitin badan",
+
+    # 😞 Kalimat hopeless
+    "aku gak berharga", "aku gagal", "semuanya percuma",
+    "hidup ini sia sia", "aku menyerah", "aku nyerah", "udah gak ada harapan",
+    "gak ada gunanya hidup"
+]]
+
+def contains_crisis_keyword(s_proc):
+    for k in CRISIS_KEYWORDS:
+        if k in s_proc:
+            return True, k
+    return False, None
+
+def classify_text(text):
+    s_proc = preprocess_text(text)
+    kw_match, kw = contains_crisis_keyword(s_proc)
+    if kw_match:
+        return np.array([0.0, 1.0], dtype=np.float32)
+    if len(s_proc.split()) <= 2:
+        return np.array([0.5, 0.5], dtype=np.float32)
+    v = vectorizer.transform([s_proc])
+    prob = float(speech_model.predict_proba(v)[0, 1])
+    return np.array([1 - prob, prob], dtype=np.float32)
+
+def speak_text(text):
+    def run():
+        engine = pyttsx3.init()
+        engine.setProperty("rate", 160)
+        engine.setProperty("volume", 1.0)
+        engine.say(text)
+        engine.runAndWait()
+    threading.Thread(target=run, daemon=True).start()
+
+speech_probs = np.array([0.5, 0.5], dtype=np.float32)
+speech_lock = threading.Lock()
+
+def speech_callback(recognizer, audio):
+    global speech_probs
+    try:
+        text = recognizer.recognize_google(audio, language="id-ID")
+        print(f"\n🗣️ Anda berkata: {text}")
+        p = classify_text(text)
+        with speech_lock:
+            speech_probs = p
+        speak_text("Terima kasih, saya mendengarkan kamu")
+    except sr.UnknownValueError:
+        print("❌ Tidak bisa mengenali suara.")
+    except sr.RequestError as e:
+        print(f"⚠️ Error STT: {e}")
+
+def init_speech_recognition():
+    recognizer = sr.Recognizer()
+    mic = sr.Microphone()
+    recognizer.dynamic_energy_threshold = True
+    recognizer.energy_threshold = 300
+    recognizer.pause_threshold = 0.8
+    with mic as source:
+        recognizer.adjust_for_ambient_noise(source, duration=1.0)
+    recognizer.listen_in_background(mic, speech_callback, phrase_time_limit=10)
 
 # ===== CAMERA HELPERS =====
 def get_available_camera(max_index=10):
     """Cari kamera yang tersedia dengan berbagai metode"""
     system = platform.system()
     
-    # Cek apakah ada /dev/video*
     if system == "Linux":
         import glob
         video_devices = glob.glob('/dev/video*')
@@ -187,14 +284,13 @@ def get_available_camera(max_index=10):
     if system == "Windows":
         backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_VFW, cv2.CAP_ANY]
     else:
-        backends = [cv2.CAP_ANY, cv2.CAP_V4L2]  # Coba CAP_ANY dulu
+        backends = [cv2.CAP_ANY, cv2.CAP_V4L2]
     
     for i in range(max_index):
         for b in backends:
             try:
                 cap = cv2.VideoCapture(i, b)
                 if cap.isOpened():
-                    # Test read frame
                     ret, _ = cap.read()
                     cap.release()
                     if ret:
@@ -227,7 +323,7 @@ def main_loop(pipelines: Dict[str, HailoPipeline]):
     
     # Set resolusi jika perlu
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
 
     # Haar cascades
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
@@ -302,7 +398,7 @@ def main_loop(pipelines: Dict[str, HailoPipeline]):
                 cv2.rectangle(frame, (x,y), (x+w,y+h), (255,0,0), 2)
 
             curr_time = time.time()
-            if curr_time - prev_time >= 1.0:  # infer tiap ~1 detik
+            if curr_time - prev_time >= 1.0:
                 face_probs = None
                 pose_probs = None
 
@@ -396,41 +492,16 @@ def main_loop(pipelines: Dict[str, HailoPipeline]):
         pose_estimator.close()
         logging.info("Cleanup complete")
 
-# ===== QUICK TEST =====
-def quick_test_pipeline(pipeline: HailoPipeline, input_size: int):
-    h = w = input_size
-    test_inp = np.random.rand(1, h, w, 3).astype(np.float32)
-    try:
-        out = hailo_infer(pipeline, test_inp)
-        logging.info("âœ“ Quick test success. Output length: %d", out.size)
-    except Exception as e:
-        logging.error("âœ— Quick test failed: %s", e)
-        logging.exception("Full traceback:")
-
 # ===== ENTRY POINT =====
 if __name__ == "__main__":
-    logging.info("=" * 60)
-    logging.info("MEMULAI APLIKASI HAILO FUSION")
-    logging.info("Input sizes: face %dx%d, pose %dx%d" % 
-                 (FACE_INPUT_SIZE, FACE_INPUT_SIZE, POSE_INPUT_SIZE, POSE_INPUT_SIZE))
-    logging.info("=" * 60)
-
+    logging.info("Memulai aplikasi fusion (face + pose + speech)")
     missing = [p for p in (HEF_FACE, HEF_POSE) if not os.path.exists(p)]
     if missing:
         logging.error("HEF files tidak ditemukan: %s", missing)
         raise SystemExit(1)
 
     vdevice, pipelines = initialize_vdevice_and_pipelines([HEF_FACE, HEF_POSE])
-
-    # quick test per pipeline (ukuran sesuai model)
-    if HEF_FACE in pipelines:
-        logging.info("Quick test face pipeline (48x48)")
-        quick_test_pipeline(pipelines[HEF_FACE], FACE_INPUT_SIZE)
-    if HEF_POSE in pipelines:
-        logging.info("Quick test pose pipeline (224x224)")
-        quick_test_pipeline(pipelines[HEF_POSE], POSE_INPUT_SIZE)
-
-    logging.info("=" * 60)
+    init_speech_recognition()
     main_loop(pipelines)
     logging.info("Selesai.")
     
