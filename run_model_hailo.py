@@ -222,6 +222,7 @@ def classify_text(text):
 tts_engine = pyttsx3.init()
 tts_engine.setProperty("rate", 160)
 tts_engine.setProperty("volume", 1.0)
+
 indo_voice_id = None
 for v in tts_engine.getProperty("voices"):
     if "Andika" in v.name or "Indonesian" in v.name or "Indonesia" in v.name:
@@ -241,29 +242,51 @@ def speak_text(text):
             tts_engine.runAndWait()
     threading.Thread(target=run, daemon=True).start()
 
+# 🧠 Fungsi ambil respon random
+def get_random_response(is_crisis):
+    if is_crisis:
+        return random.choice(df_krisis["Respon"].dropna().tolist())
+    else:
+        return random.choice(df_tidak["Respon"].dropna().tolist())
+
 # 🔐 Speech recognition lock
 speech_probs = np.array([0.5, 0.5], dtype=np.float32)
 speech_lock = threading.Lock()
 speech_busy = threading.Event()
 
 def speech_callback(recognizer, audio):
-    # Hindari callback bertumpuk
     if speech_busy.is_set():
         return
     speech_busy.set()
     global speech_probs
+
     try:
-        text = recognizer.recognize_google(audio, language="id-ID")
-        if text.strip():
+        text = recognizer.recognize_google(audio, language="id-ID").strip()
+        if text:
             print(f"\n🗣️ Anda berkata: {text}")
             p = classify_text(text)
             with speech_lock:
                 speech_probs = p
-            speak_text("Terima kasih, saya mendengarkan kamu")
+
+            # Ambil respon acak dari tabel
+            is_crisis = p[1] >= speech_threshold
+            response_text = get_random_response(is_crisis)
+            print(f"🪄 Respon acak: {response_text}")
+
+            speak_text(response_text)
+        else:
+            # reset ke netral jika kosong
+            with speech_lock:
+                speech_probs = np.array([0.5, 0.5], dtype=np.float32)
+
     except sr.UnknownValueError:
         print("❌ Tidak bisa mengenali suara.")
+        with speech_lock:
+            speech_probs = np.array([0.5, 0.5], dtype=np.float32)
     except sr.RequestError as e:
         print(f"⚠️ Error STT: {e}")
+        with speech_lock:
+            speech_probs = np.array([0.5, 0.5], dtype=np.float32)
     finally:
         speech_busy.clear()
 
@@ -276,7 +299,7 @@ def init_speech_recognition():
     with mic as source:
         recognizer.adjust_for_ambient_noise(source, duration=1.0)
     # ⏳ Batasi waktu dengar untuk percepat STT
-    recognizer.listen_in_background(mic, speech_callback, phrase_time_limit=5)
+    recognizer.listen_in_background(mic, speech_callback, phrase_time_limit=7)
 
 # ===== CAMERA HELPERS =====
 def get_available_camera(max_index=10):
