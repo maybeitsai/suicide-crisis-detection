@@ -23,13 +23,11 @@ from PIL import Image
 from torchvision import transforms
 import mediapipe as mp
 
-# ===== Speech imports =====
 import joblib
 import speech_recognition as sr
 import pyttsx3
 import pandas as pd
 
-# Hailo imports
 from hailo_platform import (
     HEF,
     VDevice,
@@ -461,16 +459,31 @@ def main_loop(pipelines: Dict[str, HailoPipeline]):
 
                 # fusion logic
                 if mode == "fusion":
-                    if face_probs is not None or pose_probs is not None:
-                        probs_final = np.zeros(len(LABELS), dtype=np.float32)
-                        if face_probs is not None: 
-                            probs_final += W_FACE * face_probs
-                        if pose_probs is not None: 
-                            probs_final += W_POSE * pose_probs
-                        pred = int(np.argmax(probs_final))
-                        last_pred = LABELS[pred]
-                        last_conf = float(probs_final[pred])
-                        logging.info("FUSION -> %s (%.2f)", last_pred, last_conf)
+                    # Ambil speech probs terakhir
+                    with speech_lock:
+                        speech_component = speech_probs.copy()
+                    probs_final = np.zeros(len(LABELS), dtype=np.float32)
+
+                    # jika tidak ada face, nilai netral
+                    if face_probs is not None:
+                        probs_final += W_FACE * face_probs
+                    else:
+                        probs_final += W_FACE * np.array([0.5, 0.5], dtype=np.float32)
+
+                    # jika tidak ada pose, nilai netral
+                    if pose_probs is not None:
+                        probs_final += W_POSE * pose_probs
+                    else:
+                        probs_final += W_POSE * np.array([0.5, 0.5], dtype=np.float32)
+
+                    # gabungkan dengan speech
+                    probs_final += W_SPEECH * speech_component
+
+                    pred = int(np.argmax(probs_final))
+                    last_pred = LABELS[pred]
+                    last_conf = float(probs_final[pred])
+                    logging.info("FUSION -> %s (%.2f)", last_pred, last_conf)
+
                 elif mode == "face" and face_probs is not None:
                     pred = int(np.argmax(face_probs))
                     last_pred = LABELS[pred]
