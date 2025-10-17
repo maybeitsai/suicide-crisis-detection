@@ -178,6 +178,7 @@ with open("models/language/threshold.txt", "r") as f:
 df_krisis = pd.read_excel("data/csv/Data_tanggapan_positif.xlsx", sheet_name="Krisis")
 df_tidak = pd.read_excel("data/csv/Data_tanggapan_positif.xlsx", sheet_name="Tidak Krisis")
 
+# 🧹 Preprocess & keyword
 def preprocess_text(s):
     s = str(s).lower()
     s = re.sub(r'[^0-9a-z\s]', ' ', s)
@@ -185,34 +186,18 @@ def preprocess_text(s):
     return s.strip()
 
 CRISIS_KEYWORDS = [preprocess_text(k) for k in [
-    # ✨ Frasa langsung
-    "bunuh diri", "saya mau mati", "saya mati", "bunuh", "ingin mati", "ingin bunuh diri",
-    "tidak ingin hidup", "sudah tidak kuat", "sudah tidak sanggup",
-    "mati saja", "selesai saja", "akhiri hidup", "putus asa",
-    "menyakiti diri", "mengakhiri hidup", "sudah tidak ada harapan",
-    "sudah ingin mati", "capek hidup",
-
-    # 💔 Variasi penulisan & ejaan
-    "gw mau mati", "gue mau mati", "pengen mati", "pgn mati", "pingin mati",
-    "udah ga kuat", "gak kuat lagi", "gk kuat", "ga kuat",
-    "cape hidup", "capee hidup", "udah cape", "sudah capek",
-    "gak sanggup lagi", "udah nyerah", "nyerah aja",
-
-    # 🥀 Kalimat tidak langsung
-    "hidup gak ada artinya", "hidup gak guna", "hidup sia sia",
-    "aku pengen hilang", "ingin hilang", "pengen ngilang", "ingin pergi selamanya",
-    "mending mati", "lebih baik mati", "biar aku mati aja",
-    "ingin tidur selamanya", "ingin berhenti hidup",
-
-    # ⚠️ Perilaku menyakiti diri
-    "lukai diri", "melukai diri", "sayat", "nyakitin diri", "self harm",
-    "aku menyakiti diri", "aku pengen nyakitin diri", "pengen sayat",
-    "pengen nyakitin badan",
-
-    # 😞 Kalimat hopeless
-    "aku gak berharga", "aku gagal", "semuanya percuma",
-    "hidup ini sia sia", "aku menyerah", "aku nyerah", "udah gak ada harapan",
-    "gak ada gunanya hidup"
+    "bunuh diri","saya mau mati","saya mati","bunuh","ingin mati","ingin bunuh diri",
+    "tidak ingin hidup","sudah tidak kuat","sudah tidak sanggup","mati saja","selesai saja",
+    "akhiri hidup","putus asa","menyakiti diri","mengakhiri hidup","sudah tidak ada harapan",
+    "sudah ingin mati","capek hidup","gw mau mati","gue mau mati","pengen mati","pgn mati",
+    "pingin mati","udah ga kuat","gak kuat lagi","gk kuat","ga kuat","cape hidup","capee hidup",
+    "udah cape","sudah capek","gak sanggup lagi","udah nyerah","nyerah aja","hidup gak ada artinya",
+    "hidup gak guna","hidup sia sia","aku pengen hilang","ingin hilang","pengen ngilang",
+    "ingin pergi selamanya","mending mati","lebih baik mati","biar aku mati aja","ingin tidur selamanya",
+    "ingin berhenti hidup","lukai diri","melukai diri","sayat","nyakitin diri","self harm",
+    "aku menyakiti diri","aku pengen nyakitin diri","pengen sayat","pengen nyakitin badan",
+    "aku gak berharga","aku gagal","semuanya percuma","hidup ini sia sia","aku menyerah",
+    "aku nyerah","udah gak ada harapan","gak ada gunanya hidup"
 ]]
 
 def contains_crisis_keyword(s_proc):
@@ -221,9 +206,10 @@ def contains_crisis_keyword(s_proc):
             return True, k
     return False, None
 
+# 📊 Speech classification
 def classify_text(text):
     s_proc = preprocess_text(text)
-    kw_match, kw = contains_crisis_keyword(s_proc)
+    kw_match, _ = contains_crisis_keyword(s_proc)
     if kw_match:
         return np.array([0.0, 1.0], dtype=np.float32)
     if len(s_proc.split()) <= 2:
@@ -232,44 +218,54 @@ def classify_text(text):
     prob = float(speech_model.predict_proba(v)[0, 1])
     return np.array([1 - prob, prob], dtype=np.float32)
 
+# 🗣️ TTS Engine (global, 1x init)
+tts_engine = pyttsx3.init()
+tts_engine.setProperty("rate", 160)
+tts_engine.setProperty("volume", 1.0)
+indo_voice_id = None
+for v in tts_engine.getProperty("voices"):
+    if "Andika" in v.name or "Indonesian" in v.name or "Indonesia" in v.name:
+        indo_voice_id = v.id
+        break
+if indo_voice_id:
+    tts_engine.setProperty("voice", indo_voice_id)
+else:
+    print("⚠️ Indonesian voice not found, using default voice")
+
+tts_lock = threading.Lock()
+
 def speak_text(text):
     def run():
-        engine = pyttsx3.init()
-        engine.setProperty("rate", 160)
-        engine.setProperty("volume", 1.0)
-
-        voices = engine.getProperty('voices')
-        voice_id = None
-        for v in voices:
-            if "Andika" in v.name or "Indonesian" in v.name or "Indonesia" in v.name:
-                voice_id = v.id
-                break
-
-        if voice_id:
-            engine.setProperty('voice', voice_id)
-        else:
-            print("⚠️ Indonesian voice not found, using default voice")
-
-        engine.say(text)
-        engine.runAndWait()
+        with tts_lock:
+            tts_engine.say(text)
+            tts_engine.runAndWait()
     threading.Thread(target=run, daemon=True).start()
 
+# 🔐 Speech recognition lock
 speech_probs = np.array([0.5, 0.5], dtype=np.float32)
 speech_lock = threading.Lock()
+speech_busy = threading.Event()
 
 def speech_callback(recognizer, audio):
+    # Hindari callback bertumpuk
+    if speech_busy.is_set():
+        return
+    speech_busy.set()
     global speech_probs
     try:
         text = recognizer.recognize_google(audio, language="id-ID")
-        print(f"\n🗣️ Anda berkata: {text}")
-        p = classify_text(text)
-        with speech_lock:
-            speech_probs = p
-        speak_text("Terima kasih, saya mendengarkan kamu")
+        if text.strip():
+            print(f"\n🗣️ Anda berkata: {text}")
+            p = classify_text(text)
+            with speech_lock:
+                speech_probs = p
+            speak_text("Terima kasih, saya mendengarkan kamu")
     except sr.UnknownValueError:
         print("❌ Tidak bisa mengenali suara.")
     except sr.RequestError as e:
         print(f"⚠️ Error STT: {e}")
+    finally:
+        speech_busy.clear()
 
 def init_speech_recognition():
     recognizer = sr.Recognizer()
@@ -279,7 +275,8 @@ def init_speech_recognition():
     recognizer.pause_threshold = 0.8
     with mic as source:
         recognizer.adjust_for_ambient_noise(source, duration=1.0)
-    recognizer.listen_in_background(mic, speech_callback, phrase_time_limit=10)
+    # ⏳ Batasi waktu dengar untuk percepat STT
+    recognizer.listen_in_background(mic, speech_callback, phrase_time_limit=5)
 
 # ===== CAMERA HELPERS =====
 def get_available_camera(max_index=10):
