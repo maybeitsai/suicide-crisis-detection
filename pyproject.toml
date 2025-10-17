@@ -3,7 +3,7 @@ name = "robot-pencegah-bunuh-diri"
 version = "0.1.0"
 description = "Robot Pencegah Bunuh Diri - Sistem deteksi ekspresi wajah untuk identifikasi krisis bunuh diri"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "numpy==1.26.4",
     "mediapipe==0.10.18",
