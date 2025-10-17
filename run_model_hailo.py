@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-run_model_fusion.py
-Fusion of Hailo (face + pose) models and speech model
+run_model_fusion_optimized.py
+Optimized fusion of Hailo (face + pose) models and speech model
 Weight: speech 0.4, pose 0.3, face 0.3
+Optimized for Raspberry Pi 5
 """
 
 import os
@@ -10,12 +11,11 @@ os.environ["OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
 import time
 import platform
 import logging
-import contextlib
 import threading
 import re
 import random
-
-from typing import Dict, Any, Tuple, List
+from collections import deque
+from typing import Dict, Tuple, List, Optional
 
 import cv2
 import numpy as np
@@ -38,6 +38,9 @@ from hailo_platform import (
     Device
 )
 
+import warnings
+warnings.filterwarnings("ignore")
+
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
 # ===== CONFIG =====
@@ -51,26 +54,44 @@ LABELS = ["TIDAK KRISIS", "KRISIS"]
 COLORS = {"TIDAK KRISIS": (0,128,0), "KRISIS": (0,0,255)}
 W_FACE, W_POSE, W_SPEECH = 0.3, 0.3, 0.4
 
-# ===== TRANSFORMS =====
-class To3Channels:
-    def __call__(self, x):
-        return x.repeat(3, 1, 1) if x.shape[0] == 1 else x
+# Performance settings
+INFERENCE_INTERVAL = 1.0  # seconds between inferences
+FPS_UPDATE_INTERVAL = 30  # frames between FPS updates
+FRAME_SKIP = 1  # process every Nth frame for detection
+MAX_FRAME_BUFFER = 3  # maximum frames to buffer
 
-face_tf = transforms.Compose([
-    transforms.Resize((FACE_INPUT_SIZE, FACE_INPUT_SIZE)),
-    transforms.ToTensor(),
-    To3Channels(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225]),
-])
-
-pose_tf = transforms.Compose([
-    transforms.Resize((POSE_INPUT_SIZE, POSE_INPUT_SIZE)),
-    transforms.ToTensor(),
-    To3Channels(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225]),
-])
+# ===== OPTIMIZED TRANSFORMS (singleton pattern) =====
+class TransformCache:
+    _face_tf = None
+    _pose_tf = None
+    
+    @classmethod
+    def get_face_transform(cls):
+        if cls._face_tf is None:
+            cls._face_tf = transforms.Compose([
+                transforms.Resize((FACE_INPUT_SIZE, FACE_INPUT_SIZE), antialias=True),
+                transforms.ToTensor(),
+                cls.To3Channels(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                   std=[0.229, 0.224, 0.225]),
+            ])
+        return cls._face_tf
+    
+    @classmethod
+    def get_pose_transform(cls):
+        if cls._pose_tf is None:
+            cls._pose_tf = transforms.Compose([
+                transforms.Resize((POSE_INPUT_SIZE, POSE_INPUT_SIZE), antialias=True),
+                transforms.ToTensor(),
+                cls.To3Channels(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                   std=[0.229, 0.224, 0.225]),
+            ])
+        return cls._pose_tf
+    
+    class To3Channels:
+        def __call__(self, x):
+            return x.repeat(3, 1, 1) if x.shape[0] == 1 else x
 
 # ===== HAILO HELPERS =====
 class HailoPipeline:
@@ -103,7 +124,7 @@ def initialize_vdevice_and_pipelines(hef_paths: List[str]) -> Tuple[VDevice, Dic
         network_groups = vdevice.configure(hef)
         if not network_groups:
             raise RuntimeError("vdevice.configure returned empty network_groups")
-        net_group = network_groups[0]  # ConfiguredNetworkGroup
+        net_group = network_groups[0]
         logging.info("Network group ready for HEF: %s", os.path.basename(hef_path))
 
         input_vstreams_params = InputVStreamParams.make_from_network_group(
@@ -133,15 +154,17 @@ def initialize_vdevice_and_pipelines(hef_paths: List[str]) -> Tuple[VDevice, Dic
     return vdevice, pipelines
 
 def hailo_infer(pipeline: HailoPipeline, inp_array: np.ndarray) -> np.ndarray:
-    """
-    inp_array: numpy float32 NHWC, shape (1,H,W,C)
-    returns flattened numpy array (float32)
-    """
+    """Optimized inference with minimal allocations"""
     if not pipeline.input_names:
         raise RuntimeError("Pipeline tidak memiliki input stream")
     
     in_name = pipeline.input_names[0]
-    inp = np.ascontiguousarray(inp_array.astype(np.float32))
+    # Avoid unnecessary copy if already contiguous and float32
+    if inp_array.flags['C_CONTIGUOUS'] and inp_array.dtype == np.float32:
+        inp = inp_array
+    else:
+        inp = np.ascontiguousarray(inp_array, dtype=np.float32)
+    
     inputs = {in_name: inp}
     
     with InferVStreams(pipeline.net_group, 
@@ -151,144 +174,170 @@ def hailo_infer(pipeline: HailoPipeline, inp_array: np.ndarray) -> np.ndarray:
             outputs = infer.infer(inputs)
     
     out_name = pipeline.output_names[0]
-    out = outputs[out_name]
-    return np.array(out).reshape(-1)
+    return outputs[out_name].reshape(-1)
 
+# Pre-allocated softmax computation
+_softmax_cache = {}
 def softmax(x: np.ndarray) -> np.ndarray:
-    e = np.exp(x - np.max(x))
+    """Optimized softmax with numerical stability"""
+    x_max = np.max(x)
+    e = np.exp(x - x_max)
     return e / np.sum(e)
 
-# ===== PREPROCESS =====
+# ===== OPTIMIZED PREPROCESS =====
 def preprocess(img_bgr: np.ndarray, transform) -> np.ndarray:
+    """Optimized preprocessing with minimal copies"""
+    # Direct conversion without intermediate allocation
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     pil = Image.fromarray(img_rgb)
     tensor = transform(pil).unsqueeze(0)
-    arr = tensor.numpy().astype(np.float32)
-    arr = np.transpose(arr, (0, 2, 3, 1))
+    # Direct transpose to NHWC
+    arr = tensor.numpy().transpose(0, 2, 3, 1).astype(np.float32)
     return arr
 
 # ===== SPEECH RECOGNITION SECTION =====
-vectorizer = joblib.load("models/language/vectorizer.pkl")
-speech_model = joblib.load("models/language/lgbm_model.pkl")
-with open("models/language/threshold.txt", "r") as f:
-    speech_threshold = float(f.read().strip())
+class SpeechRecognizer:
+    """Optimized speech recognition with caching"""
+    def __init__(self):
+        self.vectorizer = joblib.load("models/language/vectorizer.pkl")
+        self.model = joblib.load("models/language/lgbm_model.pkl")
+        with open("models/language/threshold.txt", "r") as f:
+            self.threshold = float(f.read().strip())
+        
+        # Load response tables once
+        self.df_krisis = pd.read_excel("data/csv/Data_tanggapan_positif.xlsx", sheet_name="Krisis")
+        self.df_tidak = pd.read_excel("data/csv/Data_tanggapan_positif.xlsx", sheet_name="Tidak Krisis")
+        self.krisis_responses = self.df_krisis["Respon"].dropna().tolist()
+        self.tidak_responses = self.df_tidak["Respon"].dropna().tolist()
+        
+        # Precompile regex
+        self.cleanup_pattern = re.compile(r'[^0-9a-z\s]')
+        self.whitespace_pattern = re.compile(r'\s+')
+        
+        # Preprocess crisis keywords
+        self.crisis_keywords = self._load_crisis_keywords()
+        
+        # State
+        self.probs = np.array([0.5, 0.5], dtype=np.float32)
+        self.lock = threading.Lock()
+        self.busy = threading.Event()
+    
+    def _load_crisis_keywords(self):
+        raw_keywords = [
+            "bunuh diri","saya mau mati","saya mati","bunuh","ingin mati","ingin bunuh diri",
+            "tidak ingin hidup","sudah tidak kuat","sudah tidak sanggup","mati saja","selesai saja",
+            "akhiri hidup","putus asa","menyakiti diri","mengakhiri hidup","sudah tidak ada harapan",
+            "sudah ingin mati","capek hidup","gw mau mati","gue mau mati","pengen mati","pgn mati",
+            "pingin mati","udah ga kuat","gak kuat lagi","gk kuat","ga kuat","cape hidup","capee hidup",
+            "udah cape","sudah capek","gak sanggup lagi","udah nyerah","nyerah aja","hidup gak ada artinya",
+            "hidup gak guna","hidup sia sia","aku pengen hilang","ingin hilang","pengen ngilang",
+            "ingin pergi selamanya","mending mati","lebih baik mati","biar aku mati aja","ingin tidur selamanya",
+            "ingin berhenti hidup","lukai diri","melukai diri","sayat","nyakitin diri","self harm",
+            "aku menyakiti diri","aku pengen nyakitin diri","pengen sayat","pengen nyakitin badan",
+            "aku gak berharga","aku gagal","semuanya percuma","hidup ini sia sia","aku menyerah",
+            "aku nyerah","udah gak ada harapan","gak ada gunanya hidup"
+        ]
+        return [self.preprocess_text(k) for k in raw_keywords]
+    
+    def preprocess_text(self, s):
+        s = str(s).lower()
+        s = self.cleanup_pattern.sub(' ', s)
+        s = self.whitespace_pattern.sub(' ', s)
+        return s.strip()
+    
+    def contains_crisis_keyword(self, s_proc):
+        for k in self.crisis_keywords:
+            if k in s_proc:
+                return True
+        return False
+    
+    def classify_text(self, text):
+        s_proc = self.preprocess_text(text)
+        if self.contains_crisis_keyword(s_proc):
+            return np.array([0.0, 1.0], dtype=np.float32)
+        if len(s_proc.split()) <= 2:
+            return np.array([0.5, 0.5], dtype=np.float32)
+        v = self.vectorizer.transform([s_proc])
+        prob = float(self.model.predict_proba(v)[0, 1])
+        return np.array([1 - prob, prob], dtype=np.float32)
+    
+    def get_response(self, is_crisis):
+        return random.choice(self.krisis_responses if is_crisis else self.tidak_responses)
 
-df_krisis = pd.read_excel("data/csv/Data_tanggapan_positif.xlsx", sheet_name="Krisis")
-df_tidak = pd.read_excel("data/csv/Data_tanggapan_positif.xlsx", sheet_name="Tidak Krisis")
+# TTS Engine (singleton)
+class TTSEngine:
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialize()
+        return cls._instance
+    
+    def _initialize(self):
+        self.engine = pyttsx3.init()
+        self.engine.setProperty("rate", 160)
+        self.engine.setProperty("volume", 1.0)
+        
+        indo_voice_id = None
+        for v in self.engine.getProperty("voices"):
+            if "Andika" in v.name or "Indonesian" in v.name or "Indonesia" in v.name:
+                indo_voice_id = v.id
+                break
+        if indo_voice_id:
+            self.engine.setProperty("voice", indo_voice_id)
+    
+    def speak(self, text):
+        def run():
+            with self._lock:
+                self.engine.say(text)
+                self.engine.runAndWait()
+        threading.Thread(target=run, daemon=True).start()
 
-# 🧹 Preprocess & keyword
-def preprocess_text(s):
-    s = str(s).lower()
-    s = re.sub(r'[^0-9a-z\s]', ' ', s)
-    s = re.sub(r'\s+', ' ', s)
-    return s.strip()
-
-CRISIS_KEYWORDS = [preprocess_text(k) for k in [
-    "bunuh diri","saya mau mati","saya mati","bunuh","ingin mati","ingin bunuh diri",
-    "tidak ingin hidup","sudah tidak kuat","sudah tidak sanggup","mati saja","selesai saja",
-    "akhiri hidup","putus asa","menyakiti diri","mengakhiri hidup","sudah tidak ada harapan",
-    "sudah ingin mati","capek hidup","gw mau mati","gue mau mati","pengen mati","pgn mati",
-    "pingin mati","udah ga kuat","gak kuat lagi","gk kuat","ga kuat","cape hidup","capee hidup",
-    "udah cape","sudah capek","gak sanggup lagi","udah nyerah","nyerah aja","hidup gak ada artinya",
-    "hidup gak guna","hidup sia sia","aku pengen hilang","ingin hilang","pengen ngilang",
-    "ingin pergi selamanya","mending mati","lebih baik mati","biar aku mati aja","ingin tidur selamanya",
-    "ingin berhenti hidup","lukai diri","melukai diri","sayat","nyakitin diri","self harm",
-    "aku menyakiti diri","aku pengen nyakitin diri","pengen sayat","pengen nyakitin badan",
-    "aku gak berharga","aku gagal","semuanya percuma","hidup ini sia sia","aku menyerah",
-    "aku nyerah","udah gak ada harapan","gak ada gunanya hidup"
-]]
-
-def contains_crisis_keyword(s_proc):
-    for k in CRISIS_KEYWORDS:
-        if k in s_proc:
-            return True, k
-    return False, None
-
-# 📊 Speech classification
-def classify_text(text):
-    s_proc = preprocess_text(text)
-    kw_match, _ = contains_crisis_keyword(s_proc)
-    if kw_match:
-        return np.array([0.0, 1.0], dtype=np.float32)
-    if len(s_proc.split()) <= 2:
-        return np.array([0.5, 0.5], dtype=np.float32)
-    v = vectorizer.transform([s_proc])
-    prob = float(speech_model.predict_proba(v)[0, 1])
-    return np.array([1 - prob, prob], dtype=np.float32)
-
-# 🗣️ TTS Engine (global, 1x init)
-tts_engine = pyttsx3.init()
-tts_engine.setProperty("rate", 160)
-tts_engine.setProperty("volume", 1.0)
-
-indo_voice_id = None
-for v in tts_engine.getProperty("voices"):
-    if "Andika" in v.name or "Indonesian" in v.name or "Indonesia" in v.name:
-        indo_voice_id = v.id
-        break
-if indo_voice_id:
-    tts_engine.setProperty("voice", indo_voice_id)
-else:
-    print("⚠️ Indonesian voice not found, using default voice")
-
-tts_lock = threading.Lock()
-
-def speak_text(text):
-    def run():
-        with tts_lock:
-            tts_engine.say(text)
-            tts_engine.runAndWait()
-    threading.Thread(target=run, daemon=True).start()
-
-# 🧠 Fungsi ambil respon random
-def get_random_response(is_crisis):
-    if is_crisis:
-        return random.choice(df_krisis["Respon"].dropna().tolist())
-    else:
-        return random.choice(df_tidak["Respon"].dropna().tolist())
-
-# 🔐 Speech recognition lock
-speech_probs = np.array([0.5, 0.5], dtype=np.float32)
-speech_lock = threading.Lock()
-speech_busy = threading.Event()
+# Global instances
+speech_recognizer = None
+tts_engine = None
 
 def speech_callback(recognizer, audio):
-    if speech_busy.is_set():
+    global speech_recognizer
+    if speech_recognizer.busy.is_set():
         return
-    speech_busy.set()
-    global speech_probs
+    speech_recognizer.busy.set()
 
     try:
         text = recognizer.recognize_google(audio, language="id-ID").strip()
         if text:
             print(f"\n🗣️ Anda berkata: {text}")
-            p = classify_text(text)
-            with speech_lock:
-                speech_probs = p
+            p = speech_recognizer.classify_text(text)
+            with speech_recognizer.lock:
+                speech_recognizer.probs = p
 
-            # Ambil respon acak dari tabel
-            is_crisis = p[1] >= speech_threshold
-            response_text = get_random_response(is_crisis)
-            print(f"🪄 Respon acak: {response_text}")
-
-            speak_text(response_text)
+            is_crisis = p[1] >= speech_recognizer.threshold
+            response_text = speech_recognizer.get_response(is_crisis)
+            print(f"🪄 Respon: {response_text}")
+            tts_engine.speak(response_text)
         else:
-            # reset ke netral jika kosong
-            with speech_lock:
-                speech_probs = np.array([0.5, 0.5], dtype=np.float32)
+            with speech_recognizer.lock:
+                speech_recognizer.probs = np.array([0.5, 0.5], dtype=np.float32)
 
     except sr.UnknownValueError:
-        print("❌ Tidak bisa mengenali suara.")
-        with speech_lock:
-            speech_probs = np.array([0.5, 0.5], dtype=np.float32)
+        with speech_recognizer.lock:
+            speech_recognizer.probs = np.array([0.5, 0.5], dtype=np.float32)
     except sr.RequestError as e:
         print(f"⚠️ Error STT: {e}")
-        with speech_lock:
-            speech_probs = np.array([0.5, 0.5], dtype=np.float32)
+        with speech_recognizer.lock:
+            speech_recognizer.probs = np.array([0.5, 0.5], dtype=np.float32)
     finally:
-        speech_busy.clear()
+        speech_recognizer.busy.clear()
 
 def init_speech_recognition():
+    global speech_recognizer, tts_engine
+    speech_recognizer = SpeechRecognizer()
+    tts_engine = TTSEngine()
+    
     recognizer = sr.Recognizer()
     mic = sr.Microphone()
     recognizer.dynamic_energy_threshold = True
@@ -296,26 +345,20 @@ def init_speech_recognition():
     recognizer.pause_threshold = 0.8
     with mic as source:
         recognizer.adjust_for_ambient_noise(source, duration=1.0)
-    # ⏳ Batasi waktu dengar untuk percepat STT
     recognizer.listen_in_background(mic, speech_callback, phrase_time_limit=7)
 
 # ===== CAMERA HELPERS =====
-def get_available_camera(max_index=10):
-    """Cari kamera yang tersedia dengan berbagai metode"""
+def get_available_camera(max_index=5):  # Reduced from 10
+    """Optimized camera detection"""
     system = platform.system()
     
     if system == "Linux":
         import glob
         video_devices = glob.glob('/dev/video*')
-        logging.info("Video devices found: %s", video_devices)
-        
-        if not video_devices:
-            logging.warning("Tidak ada /dev/video* devices!")
+        if video_devices:
+            logging.info("Video devices found: %s", video_devices)
     
-    if system == "Windows":
-        backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_VFW, cv2.CAP_ANY]
-    else:
-        backends = [cv2.CAP_ANY, cv2.CAP_V4L2]
+    backends = [cv2.CAP_V4L2, cv2.CAP_ANY] if system != "Windows" else [cv2.CAP_DSHOW, cv2.CAP_MSMF]
     
     for i in range(max_index):
         for b in backends:
@@ -326,11 +369,24 @@ def get_available_camera(max_index=10):
                     cap.release()
                     if ret:
                         return i, b
-            except Exception as e:
-                logging.debug(f"Failed to open camera {i} with backend {b}: {e}")
+            except Exception:
                 continue
     
     return None, None
+
+# ===== FPS TRACKER =====
+class FPSTracker:
+    def __init__(self, window_size=30):
+        self.timestamps = deque(maxlen=window_size)
+    
+    def update(self):
+        self.timestamps.append(time.time())
+    
+    def get_fps(self):
+        if len(self.timestamps) < 2:
+            return 0.0
+        elapsed = self.timestamps[-1] - self.timestamps[0]
+        return len(self.timestamps) / elapsed if elapsed > 0 else 0.0
 
 # ===== MAIN LOOP =====
 def main_loop(pipelines: Dict[str, HailoPipeline]):
@@ -341,31 +397,28 @@ def main_loop(pipelines: Dict[str, HailoPipeline]):
     if cam_idx is None:
         logging.error("=" * 60)
         logging.error("KAMERA TIDAK DITEMUKAN!")
-        logging.error("Pastikan:")
-        logging.error("1. Kamera terhubung dengan benar")
-        logging.error("2. Jalankan: ls -la /dev/video*")
-        logging.error("3. Cek permission: sudo usermod -a -G video $USER")
-        logging.error("4. Atau gunakan: sudo chmod 666 /dev/video*")
+        logging.error("Pastikan kamera terhubung dengan benar")
         logging.error("=" * 60)
-        raise RuntimeError("Tidak menemukan kamera. Pastikan kamera terhubung.")
+        raise RuntimeError("Tidak menemukan kamera.")
     
     logging.info("Kamera ditemukan: index=%s backend=%s", cam_idx, backend)
     cap = cv2.VideoCapture(cam_idx, backend)
     
-    # Set resolusi jika perlu
+    # Optimized resolution for Pi 5
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize latency
 
-    # Haar cascades
+    # Load cascades once
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     upperbody_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_upperbody.xml")
 
-    # MediaPipe pose
+    # MediaPipe pose with optimized settings for Pi
     mp_pose = mp.solutions.pose
     mp_drawing = mp.solutions.drawing_utils
     pose_estimator = mp_pose.Pose(
         static_image_mode=False, 
-        model_complexity=1,
+        model_complexity=0,  # Lighter model for Pi
         enable_segmentation=False, 
         min_detection_confidence=0.5, 
         min_tracking_confidence=0.5
@@ -374,66 +427,81 @@ def main_loop(pipelines: Dict[str, HailoPipeline]):
     mode = "fusion"
     logging.info("Mode awal: %s", mode)
     logging.info("=" * 60)
-    logging.info("CONTROLS:")
-    logging.info("  [F] - Face mode only")
-    logging.info("  [P] - Pose mode only")
-    logging.info("  [O] - Fusion mode (face + pose)")
-    logging.info("  [Q] - Quit")
+    logging.info("CONTROLS: [F] Face | [P] Pose | [O] Fusion | [Q] Quit")
     logging.info("=" * 60)
 
-    prev_time = time.time()
+    prev_inference_time = time.time()
     last_pred = None
     last_conf = 0.0
     frame_count = 0
+    fps_tracker = FPSTracker()
+    
+    # Get transforms
+    face_tf = TransformCache.get_face_transform()
+    pose_tf = TransformCache.get_pose_transform()
+    
+    # Pre-allocate neutral probs
+    neutral_probs = np.array([0.5, 0.5], dtype=np.float32)
 
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
-                logging.warning("Failed to read frame, skipping...")
-                time.sleep(0.1)
+                time.sleep(0.01)
                 continue
             
             frame_count += 1
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
+            fps_tracker.update()
+            
+            # Only process detection every FRAME_SKIP frames
+            process_detection = (frame_count % FRAME_SKIP == 0)
+            
             faces, bodies = [], []
-            if mode in ("face", "fusion"):
-                faces = face_cascade.detectMultiScale(
-                    gray, scaleFactor=1.1382, minNeighbors=7, minSize=(128,128)
-                )
-            if mode in ("pose", "fusion"):
-                bodies = upperbody_cascade.detectMultiScale(
-                    gray, scaleFactor=1.01618, minNeighbors=5, minSize=(256,256)
-                )
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                try:
-                    results = pose_estimator.process(rgb)
-                except Exception as e:
-                    logging.warning("MediaPipe crash: %s", e)
-                    results = None
-                if results and results.pose_landmarks:
-                    mp_drawing.draw_landmarks(
-                        frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
-                        landmark_drawing_spec=mp_drawing.DrawingSpec(
-                            color=(0,255,255), thickness=2, circle_radius=2
-                        ),
-                        connection_drawing_spec=mp_drawing.DrawingSpec(
-                            color=(0,0,255), thickness=2, circle_radius=2
-                        )
+            results = None
+            
+            if process_detection:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                
+                if mode in ("face", "fusion"):
+                    faces = face_cascade.detectMultiScale(
+                        gray, scaleFactor=1.1382, minNeighbors=7, minSize=(128,128)
                     )
+                if mode in ("pose", "fusion"):
+                    bodies = upperbody_cascade.detectMultiScale(
+                        gray, scaleFactor=1.01618, minNeighbors=5, minSize=(256,256)
+                    )
+                    # Only run MediaPipe if we have detected body
+                    if len(bodies) > 0:
+                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        try:
+                            results = pose_estimator.process(rgb)
+                        except Exception as e:
+                            logging.debug("MediaPipe error: %s", e)
 
+            # Draw detections
             for (x,y,w,h) in faces: 
                 cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,0), 2)
             for (x,y,w,h) in bodies: 
                 cv2.rectangle(frame, (x,y), (x+w,y+h), (255,0,0), 2)
+            
+            if results and results.pose_landmarks:
+                mp_drawing.draw_landmarks(
+                    frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
+                    landmark_drawing_spec=mp_drawing.DrawingSpec(
+                        color=(0,255,255), thickness=2, circle_radius=2
+                    ),
+                    connection_drawing_spec=mp_drawing.DrawingSpec(
+                        color=(0,0,255), thickness=2, circle_radius=2
+                    )
+                )
 
+            # Inference at specified interval
             curr_time = time.time()
-            if curr_time - prev_time >= 1.0:
+            if curr_time - prev_inference_time >= INFERENCE_INTERVAL:
                 face_probs = None
                 pose_probs = None
 
-                if mode in ("face", "fusion") and face_pipe is not None and len(faces) > 0:
+                if mode in ("face", "fusion") and face_pipe and len(faces) > 0:
                     x,y,w,h = faces[0]
                     face_crop = frame[y:y+h, x:x+w]
                     if face_crop.size > 0:
@@ -441,11 +509,10 @@ def main_loop(pipelines: Dict[str, HailoPipeline]):
                             inp = preprocess(face_crop, face_tf)
                             out = hailo_infer(face_pipe, inp)
                             face_probs = softmax(out)
-                            logging.debug("Face inference OK: %s", face_probs)
                         except Exception as e:
-                            logging.warning("Face inference error: %s", e)
+                            logging.debug("Face inference error: %s", e)
 
-                if mode in ("pose", "fusion") and pose_pipe is not None and len(bodies) > 0:
+                if mode in ("pose", "fusion") and pose_pipe and len(bodies) > 0:
                     x,y,w,h = bodies[0]
                     body_crop = frame[y:y+h, x:x+w]
                     if body_crop.size > 0:
@@ -453,31 +520,19 @@ def main_loop(pipelines: Dict[str, HailoPipeline]):
                             inp = preprocess(body_crop, pose_tf)
                             out = hailo_infer(pose_pipe, inp)
                             pose_probs = softmax(out)
-                            logging.debug("Pose inference OK: %s", pose_probs)
                         except Exception as e:
-                            logging.warning("Pose inference error: %s", e)
+                            logging.debug("Pose inference error: %s", e)
 
-                # fusion logic
+                # Fusion logic
                 if mode == "fusion":
-                    # Ambil speech probs terakhir
-                    with speech_lock:
-                        speech_component = speech_probs.copy()
-                    probs_final = np.zeros(len(LABELS), dtype=np.float32)
-
-                    # jika tidak ada face, nilai netral
-                    if face_probs is not None:
-                        probs_final += W_FACE * face_probs
-                    else:
-                        probs_final += W_FACE * np.array([0.5, 0.5], dtype=np.float32)
-
-                    # jika tidak ada pose, nilai netral
-                    if pose_probs is not None:
-                        probs_final += W_POSE * pose_probs
-                    else:
-                        probs_final += W_POSE * np.array([0.5, 0.5], dtype=np.float32)
-
-                    # gabungkan dengan speech
-                    probs_final += W_SPEECH * speech_component
+                    with speech_recognizer.lock:
+                        speech_component = speech_recognizer.probs.copy()
+                    
+                    probs_final = (
+                        W_FACE * (face_probs if face_probs is not None else neutral_probs) +
+                        W_POSE * (pose_probs if pose_probs is not None else neutral_probs) +
+                        W_SPEECH * speech_component
+                    )
 
                     pred = int(np.argmax(probs_final))
                     last_pred = LABELS[pred]
@@ -488,29 +543,25 @@ def main_loop(pipelines: Dict[str, HailoPipeline]):
                     pred = int(np.argmax(face_probs))
                     last_pred = LABELS[pred]
                     last_conf = float(face_probs[pred])
-                    logging.info("FACE -> %s (%.2f)", last_pred, last_conf)
                 elif mode == "pose" and pose_probs is not None:
                     pred = int(np.argmax(pose_probs))
                     last_pred = LABELS[pred]
                     last_conf = float(pose_probs[pred])
-                    logging.info("POSE -> %s (%.2f)", last_pred, last_conf)
 
-                prev_time = curr_time
+                prev_inference_time = curr_time
 
-            # overlay label
-            if last_pred is not None:
-                label = f"{last_pred} ({last_conf:.2f}) | MODE: {mode.upper()}"
+            # Overlay label
+            if last_pred:
+                label = f"{last_pred} ({last_conf:.2f}) | {mode.upper()}"
                 color = COLORS.get(last_pred, (0,0,0))
-                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
-                x_text, y_text = 10, 40
-                cv2.rectangle(frame, (x_text-5, y_text-th-5), 
-                            (x_text+tw+5, y_text+5), color, -1)
-                cv2.putText(frame, label, (x_text, y_text), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255,255,255), 2)
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+                cv2.rectangle(frame, (5, 20-th-5), (15+tw, 25), color, -1)
+                cv2.putText(frame, label, (10, 20), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
 
-            # FPS counter
-            if frame_count % 30 == 0:
-                fps = 30 / (time.time() - prev_time + 0.001)
+            # FPS display
+            if frame_count % FPS_UPDATE_INTERVAL == 0:
+                fps = fps_tracker.get_fps()
                 cv2.putText(frame, f"FPS: {fps:.1f}", (10, frame.shape[0]-10),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
 
@@ -540,7 +591,7 @@ def main_loop(pipelines: Dict[str, HailoPipeline]):
 
 # ===== ENTRY POINT =====
 if __name__ == "__main__":
-    logging.info("Memulai aplikasi fusion (face + pose + speech)")
+    logging.info("Memulai aplikasi fusion (face + pose + speech) - Optimized for Pi 5")
     missing = [p for p in (HEF_FACE, HEF_POSE) if not os.path.exists(p)]
     if missing:
         logging.error("HEF files tidak ditemukan: %s", missing)
@@ -550,4 +601,3 @@ if __name__ == "__main__":
     init_speech_recognition()
     main_loop(pipelines)
     logging.info("Selesai.")
-    
