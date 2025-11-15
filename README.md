@@ -410,22 +410,362 @@ ls models/pose-recognition.pt
 - Turunkan resolusi kamera
 - Gunakan mode single (face/pose) bukan fusion
 
-### 📓 Menggunakan Notebook untuk Analisis
+### 🧠 Model Training & Conversion Guide
+
+Panduan lengkap untuk melatih model dari dataset dan mengkonversi ke berbagai format termasuk Hailo HEF.
+
+#### 📚 **Step 1: Data Preparation (Ekstraksi Video ke Gambar)**
+
+**Objective**: Konversi video krisis/non-krisis menjadi gambar wajah dan skeleton pose.
+
+**Gunakan notebook**: `extract_videos.ipynb`
+
+**Proses Ekstraksi Wajah**:
+
+- Deteksi wajah menggunakan MTCNN (confidence: 0.85)
+- Filter aspek ratio untuk menghindari wajah yang terdistorsi
+- Minimum ukuran wajah: 64×64 piksel
+- Normalisasi ke 224×224 piksel
+- **Hasil**: ~4,094 face images siap training
+
+**Proses Ekstraksi Pose**:
+
+- Deteksi pose menggunakan MediaPipe (33 keypoint)
+- Overlay skeleton dengan visualisasi joints dan connections
+- Normalisasi ke 224×224 piksel
+- **Hasil**: ~7,237 pose skeleton images siap training
+
+**Output Directory**:
+
+```
+data/final/
+├── face/
+│   ├── krisis/         (2,315 images)
+│   └── tidak_krisis/   (1,779 images)
+└── pose/
+    ├── krisis/         (3,628 images)
+    └── tidak_krisis/   (3,609 images)
+```
+
+---
+
+#### 🎓 **Step 2: Model Training**
+
+**Objective**: Melatih MobileNetV3 models pada face dan pose datasets.
+
+**Untuk Face Expression Model**:
+
+Gunakan notebook: `face-expression.ipynb`
+
+**Konfigurasi Training**:
+
+- Jumlah epoch: 10 epoch
+- Batch size: 64 gambar per batch
+- Ukuran gambar input: 224×224 piksel
+- Learning rate: 1.618e-5 (fine-tuning pada pretrained model)
+- Data split: 80% training, 10% validation, 10% testing
+
+**Dataset Breakdown**:
+
+- Training: 3,275 face images
+- Validation: 409 face images
+- Testing: 410 face images
+
+**Data Augmentation** (untuk mencegah overfitting):
+
+- Random horizontal flip (memutar gambar secara horizontal)
+- Random rotation hingga 90 derajat
+- Color jitter untuk simulasi variasi lighting
+
+**Model Architecture**:
+
+- Backbone: MobileNetV3-Large (pretrained pada ImageNet)
+- Custom classifier head untuk klasifikasi krisis/tidak krisis
+
+**Output Training**:
+
+- Best model: `models/face-expression-directml-v2.pt`
+- Metrik evaluasi: Accuracy, Precision, Recall, F1-score, ROC-AUC
+
+---
+
+**Untuk Pose Recognition Model**:
+
+Gunakan notebook: `pose-recognition.ipynb`
+
+**Konfigurasi Training**:
+
+- Jumlah epoch: 5 epoch (lebih singkat karena dataset lebih besar & seimbang)
+- Batch size: 64 gambar per batch
+- Learning rate: 1.618e-5
+- Data split: 80% training, 10% validation, 10% testing
+
+**Dataset Breakdown**:
+
+- Training: 5,790 pose skeleton images
+- Validation: 724 pose skeleton images
+- Testing: 723 pose skeleton images
+- **Perfect balance**: ~2,895 images per kelas di training set
+
+**Data Augmentation** (spesifik untuk pose):
+
+- Random horizontal flip
+- Random vertical flip (unik untuk pose detection)
+- Random rotation hingga 90 derajat
+- Color jitter
+
+**Model Architecture**:
+
+- Sama dengan Face Model (MobileNetV3-Large)
+
+**Output Training**:
+
+- Best model: `models/pose-recognition-directml-v2.pt`
+
+---
+
+**Training Workflow**:
+
+1. **Run Data Extraction**
+
+   - Buka `extract_videos.ipynb`
+   - Jalankan semua cell untuk mengekstraksi video
+
+2. **Run Face Training**
+
+   - Buka `face-expression.ipynb`
+   - Jalankan semua cell untuk melatih face model
+   - Output: `models/face-expression-directml-v2.pt`
+
+3. **Run Pose Training**
+   - Buka `pose-recognition.ipynb`
+   - Jalankan semua cell untuk melatih pose model
+   - Output: `models/pose-recognition-directml-v2.pt`
+
+---
+
+#### 🔄 **Step 3: Model Conversion - PyTorch to ONNX**
+
+**Objective**: Konversi PyTorch models ke ONNX format untuk cross-platform deployment.
+
+**Proses Konversi**:
+
+- Load trained PyTorch model (.pt)
+- Set model ke evaluation mode (no training)
+- Create dummy input tensor untuk tracing
+- Export ke ONNX format dengan dynamic batch size
+- Verify ONNX model validity
+
+**Output**:
+
+```
+models/onnx/
+├── face-expression.onnx        # ~21 MB
+└── pose-recognition.onnx       # ~21 MB
+```
+
+**Keuntungan ONNX**:
+
+- ✅ Cross-platform compatibility (Windows, Linux, macOS)
+- ✅ Framework-agnostic (bukan hanya PyTorch)
+- ✅ Hardware acceleration support
+- ✅ Standardized format untuk production
+
+---
+
+#### 🎯 **Step 4: ONNX to Hailo Archive (HAR)**
+
+**Objective**: Konversi ONNX ke Hailo Archive format untuk persiapan kompilasi.
+
+**Prerequisites**:
+
+- Install Hailo Dataflow Compiler
+- Verifikasi instalasi dengan memeriksa version
+
+**Proses Konversi**:
+
+- Gunakan Hailo CLI tools untuk konversi ONNX ke HAR
+- Tersedia dua varian: Standard dan Optimized
+- Standard HAR: ukuran normal, untuk testing
+- Optimized HAR: ukuran lebih kecil, performa lebih baik (recommended untuk edge devices)
+
+**Optimasi Level**:
+
+- Level 0: No optimization
+- Level 1: Light optimization (basic size reduction)
+- Level 2: Aggressive optimization (recommended untuk production)
+
+**Output**:
+
+```
+models/har/
+├── face-expression.har         # Standard variant
+├── face-expression-opt.har     # Optimized variant (recommended)
+├── pose-recognition.har        # Standard variant
+└── pose-recognition-opt.har    # Optimized variant (recommended)
+```
+
+**Catatan**: Gunakan optimized variant (-opt.har) untuk hasil terbaik di edge devices seperti Raspberry Pi 5
+
+---
+
+#### ⚡ **Step 5: HAR to Hailo Executable (HEF) - Compilation**
+
+**Objective**: Compile HAR format ke HEF (Hailo Executable Format) untuk eksekusi di Hailo-8L accelerator.
+
+**Prerequisites**:
+
+- Install Hailo Compiler tools
+- Hailo device terdeteksi (untuk verification)
+- Target platform: Hailo-8L processor
+
+**Proses Kompilasi**:
+
+- Load optimized HAR file
+- Compile ke HEF dengan target Hailo-8L
+- Apply optimization level 2 untuk performa maksimal
+- Optional: Apply 8-bit quantization untuk ukuran lebih kecil
+
+**Output**:
+
+```
+models/hef/
+├── face-expression/
+│   ├── face-expression.hef             # Ready untuk Hailo-8L
+│   └── face-expression_compiled.har    # Intermediate file
+└── pose-recognition/
+    ├── pose-recognition.hef            # Ready untuk Hailo-8L
+    └── pose-recognition_compiled.har   # Intermediate file
+```
+
+**Catatan**:
+
+- HEF file adalah format final yang ready untuk deployment
+- File size biasanya 5-15 MB setelah kompilasi dan quantization
+- 8-bit quantization mengurangi akurasi minimal (~1-2%) tapi mengurangi ukuran signifikan
+
+---
+
+#### ✅ **Step 6: Verification & Testing**
+
+**Objective**: Verify HEF file adalah valid dan melakukan inference testing di Hailo-8L device.
+
+**Verifikasi HEF File**:
+
+- Check file integrity dan compatibility
+- Validate model structure di dalam HEF
+- Ensure quantization parameters correct
+
+**Inference Testing**:
+
+- Run test samples melalui HEF model di Hailo device
+- Verify output shape dan data types
+- Compare inference latency vs PyTorch model
+
+**Performance Benchmarking**:
+
+- Measure throughput: images per second
+- Measure latency: milliseconds per inference
+- Power consumption: watts (Hailo-8L ~5W typical)
+
+**Expected Performance Metrics**:
+
+**Face Expression Model**:
+
+- Input: 224×224 RGB image
+- Output: 2 classes (krisis, tidak_krisis) dengan confidence scores
+- Latency on Hailo-8L: ~5-8ms per image
+- Throughput: ~125-200 images/second
+- Power: ~5W
+
+**Pose Recognition Model**:
+
+- Input: 224×224 RGB image (skeleton overlay)
+- Output: 2 classes dengan confidence scores
+- Latency on Hailo-8L: ~5-8ms per image
+- Throughput: ~125-200 images/second
+- Power: ~5W
+
+**Deployment Checklist**:
+
+- ✓ HEF files generated successfully
+- ✓ File integrity verified
+- ✓ Test inference completed
+- ✓ Performance benchmarks acceptable
+- ✓ Ready untuk production deployment
+
+**Selanjutnya**: HEF files di `models/hef/` siap untuk deployment ke Hailo-8L device atau embedded system (Raspberry Pi 5, Orange Pi, dll)
+
+---
+
+#### 📊 **Complete Model Training & Conversion Workflow**
+
+```
+┌─────────────────────────────┐
+│ 1. Video Data               │  (source: data/2. Data Video/)
+│    - Krisis videos          │
+│    - Tidak Krisis videos    │
+└────────────┬────────────────┘
+             │ extract_videos.ipynb
+             ▼
+┌─────────────────────────────┐
+│ 2. Extracted Images         │  (Face: 4,094 | Pose: 7,237)
+│    - Face images (224×224)  │
+│    - Pose skeleton images   │
+└────────────┬────────────────┘
+             │ face-expression.ipynb & pose-recognition.ipynb
+             ▼
+┌─────────────────────────────┐
+│ 3. Trained PyTorch Models   │  (.pt format)
+│    - face-expression.pt     │
+│    - pose-recognition.pt    │
+└────────────┬────────────────┘
+             │ torch.onnx.export()
+             ▼
+┌─────────────────────────────┐
+│ 4. ONNX Models              │  (cross-platform)
+│    - face-expression.onnx   │
+│    - pose-recognition.onnx  │
+└────────────┬────────────────┘
+             │ hailortcli onnx-to-har
+             ▼
+┌─────────────────────────────┐
+│ 5. Hailo Archive (HAR)      │  (intermediate format)
+│    - *.har (standard)       │
+│    - *-opt.har (optimized)  │
+└────────────┬────────────────┘
+             │ hailortcli compile
+             ▼
+┌─────────────────────────────┐
+│ 6. Hailo Executable (HEF)   │  (ready for Hailo-8L)
+│    - face-expression.hef    │
+│    - pose-recognition.hef   │
+└─────────────────────────────┘
+```
+
+---
+
+### 📓 Menggunakan Notebook untuk Analisis & Training
 
 ```bash
-# Face Expression Analysis
+# 1. Data Extraction (Video → Images)
+jupyter notebook extract_videos.ipynb
+
+# 2. Face Expression Model Training
 jupyter notebook face-expression.ipynb
 
-# Pose Recognition Analysis
+# 3. Pose Recognition Model Training
 jupyter notebook pose-recognition.ipynb
 ```
 
-**Fitur Notebook:**
+**Fitur Notebook**:
 
-- Visualisasi data training
-- Evaluasi performa model
-- Analisis confusion matrix
-- Testing dengan gambar statis
+- 📊 Visualisasi data training dan distribusi kelas
+- 🎓 Training loops dengan progress tracking
+- 📈 Evaluasi performa model (accuracy, precision, recall, F1, ROC-AUC)
+- 🔍 Analisis confusion matrix
+- 🧪 Testing dengan gambar statis
+- 💾 Model checkpointing dan early stopping
 
 ## 📁 Struktur Proyek
 
