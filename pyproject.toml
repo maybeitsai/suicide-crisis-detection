@@ -3,10 +3,9 @@ name = "robot-pencegah-bunuh-diri"
 version = "0.1.0"
 description = "Robot Pencegah Bunuh Diri - Sistem deteksi ekspresi wajah untuk identifikasi krisis bunuh diri"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = [
     "numpy==1.26.4",
-    "mediapipe==0.10.18",
     "torch==2.3.1",
     "torchvision==0.18.1",
     "scikit-learn==1.6.1",
@@ -21,4 +20,8 @@ dependencies = [
     "lightgbm>=4.6.0",
     "openpyxl>=3.1.5",
     "pyaudio>=0.2.14",
+    "torch-directml==0.2.3.dev240715",
+    "facenet-pytorch>=2.5.3",
+    "mediapipe>=0.10.21",
+    "ffmpeg-python>=0.2.0",
 ]
