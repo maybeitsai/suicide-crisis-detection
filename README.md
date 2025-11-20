@@ -17,13 +17,16 @@ Proyek ini mengembangkan robot pendamping yang dapat mendeteksi tanda-tanda kris
 
 ## 🚀 Fitur Utama
 
-- ✅ Deteksi real-time melalui kamera
+- ✅ **Deteksi Visual Real-time**: Analisis melalui kamera webcam
+- ✅ **Deteksi Audio/Suara**: Analisis percakapan dengan speech recognition
 - ✅ Model AI berbasis MobileNetV3 (optimized untuk performa)
 - ✅ Analisis ekspresi wajah dan pose tubuh
+- ✅ **Analisis Teks/Ucapan**: LightGBM classifier dengan TF-IDF vectorizer
 - ✅ Sistem klasifikasi krisis/tidak krisis
+- ✅ **Text-to-Speech Response**: Respon otomatis berbahasa Indonesia
 - ✅ Interface yang mudah digunakan
-- ✅ 3 mode deteksi: Face, Pose, dan Fusion
-- ✅ Kontrol keyboard interaktif
+- ✅ 3 mode deteksi visual: Face, Pose, dan Fusion
+- ✅ Kontrol keyboard dan voice interaktif
 - ✅ MediaPipe pose estimation terintegrasi
 
 ## ⚡ Quick Start
@@ -36,24 +39,97 @@ cd "suicide-crisis-detection"
 # Install dependencies dengan UV
 uv sync
 
-# Jalankan sistem deteksi (pilih sesuai platform):
+# Jalankan sistem deteksi (pilih mode sesuai kebutuhan):
+
+# 1. VISUAL DETECTION - Analisis kamera
 python run_model.py        # CPU/GPU (Windows/Linux/macOS)
 python run_model_hailo.py  # Hailo AI Hat+ (Raspberry Pi 5)
 
-# Kontrol keyboard:
+# 2. SPEECH DETECTION - Analisis suara/percakapan
+python run_model_speech.py  # Voice recognition + TTS response
+
+# Kontrol keyboard (Visual mode):
 F = Face mode | P = Pose mode | O = Fusion mode | Q = Quit
+
+# Voice commands (Speech mode):
+Ucapkan "exit" untuk keluar | Bicara normal untuk analisis
 ```
 
 ## 🛠️ Teknologi yang Digunakan
 
+### 🎯 **Core Technologies**
+
 - **Python 3.9+**
-- **PyTorch** - Deep Learning Framework
-- **OpenCV** - Computer Vision
-- **Torchvision** - Pre-trained Models
 - **UV Package Manager** - Dependency Management
-- **ONNX Runtime** - Cross-platform ML inference
-- **Hailo SDK** - Hardware acceleration untuk Hailo AI processors
+
+### 🤖 **Visual AI Models**
+
+- **PyTorch** - Deep Learning Framework untuk computer vision
+- **OpenCV** - Computer Vision processing
+- **Torchvision** - Pre-trained Models (MobileNetV3)
 - **MediaPipe** - Pose estimation dan computer vision
+- **ONNX Runtime** - Cross-platform ML inference
+
+### 🗣️ **Speech & Language AI**
+
+- **LightGBM** - Gradient boosting untuk text classification
+- **SpeechRecognition** - Google Speech-to-Text API
+- **pyttsx3** - Text-to-Speech engine
+- **scikit-learn** - TF-IDF vectorization dan preprocessing
+- **pandas** - Data manipulation untuk training dataset
+
+### ⚡ **Hardware Acceleration**
+
+- **Hailo SDK** - Hardware acceleration untuk Hailo AI processors
+- **CUDA Support** - GPU acceleration untuk PyTorch models
+
+## 📁 **Model Files Structure**
+
+```
+models/
+├── 📸 VISUAL MODELS
+│   ├── face-expression.pt              # PyTorch face model (CPU/GPU)
+│   ├── face-expression-directml.pt     # DirectML optimized
+│   ├── face-expression-v2.pt           # Version 2
+│   ├── pose-recognition.pt             # PyTorch pose model (CPU/GPU)
+│   ├── pose-recognition-directml.pt    # DirectML optimized
+│   └── pose-recognition-v2.pt          # Version 2
+│
+├── 🗣️ SPEECH/LANGUAGE MODELS
+│   └── language/
+│       ├── vectorizer.pkl              # TF-IDF vectorizer
+│       ├── lgbm_model.pkl             # LightGBM classifier
+│       └── threshold.txt               # Optimal classification threshold
+│
+├── 🌐 CROSS-PLATFORM MODELS (ONNX)
+│   └── onnx/
+│       ├── face-expression.onnx        # Cross-platform face model
+│       └── pose-recognition.onnx       # Cross-platform pose model
+│
+├── ⚡ HAILO AI MODELS
+│   ├── har/                           # Hailo Archive (intermediate)
+│   │   ├── face-expression.har
+│   │   ├── face-expression-opt.har    # Optimized variant
+│   │   ├── pose-recognition.har
+│   │   └── pose-recognition-opt.har   # Optimized variant
+│   │
+│   └── hef/                           # Hailo Executable (final)
+│       ├── face-expression/
+│       │   ├── face-expression.hef    # Ready untuk Hailo-8L
+│       │   └── face-expression_compiled.har
+│       └── pose-recognition/
+│           ├── pose-recognition.hef   # Ready untuk Hailo-8L
+│           └── pose-recognition_compiled.har
+└──
+```
+
+**Model Usage by Platform:**
+
+| Platform                   | Face Model             | Pose Model              | Speech Model     | Format                 |
+| -------------------------- | ---------------------- | ----------------------- | ---------------- | ---------------------- |
+| **Windows/Linux/macOS**    | `face-expression.pt`   | `pose-recognition.pt`   | `language/*.pkl` | PyTorch + scikit-learn |
+| **Cross-Platform**         | `face-expression.onnx` | `pose-recognition.onnx` | `language/*.pkl` | ONNX + scikit-learn    |
+| **Raspberry Pi 5 + Hailo** | `face-expression.hef`  | `pose-recognition.hef`  | `language/*.pkl` | HEF + scikit-learn     |
 
 ## 🚀 Hardware Acceleration & Deployment Options
 
@@ -254,9 +330,44 @@ sudo hailortcli monitor --rate 1000
 sudo hailortcli reset
 ```
 
-#### 🎮 Kontrol Keyboard Interaktif
+#### 🗣️ Menjalankan Speech Detection System
 
-Setelah menjalankan program, gunakan keyboard untuk mengontrol mode deteksi:
+**Mode Deteksi Suara & Percakapan:**
+
+```bash
+python run_model_speech.py
+```
+
+**Fitur Speech System:**
+
+- 🎤 **Real-time Speech Recognition** - Google Speech-to-Text API (Bahasa Indonesia)
+- 🧠 **Text Classification** - LightGBM model dengan TF-IDF features
+- 🗨️ **Crisis Keyword Detection** - 50+ kata kunci krisis bunuh diri
+- 🔊 **Text-to-Speech Response** - Respons otomatis dalam Bahasa Indonesia
+- ⚡ **Low Latency** - Response time <2 detik
+
+**Voice Commands:**
+
+| Command           | Action   | Deskripsi                            |
+| ----------------- | -------- | ------------------------------------ |
+| **Bicara Normal** | Analisis | Sistem akan menganalisis ucapan Anda |
+| **"exit"**        | Keluar   | Hentikan program speech detection    |
+
+**Contoh Interaksi:**
+
+```
+🗣️ User: "Saya merasa sedih hari ini"
+📊 Sistem: TIDAK KRISIS (Prob: 0.23)
+🔊 Respon: "Saya mendengarkan kamu, ceritakan lebih lanjut"
+
+🗣️ User: "Saya ingin mati saja"
+📊 Sistem: KRISIS (Prob: 1.0) [keyword detected]
+🔊 Respon: "Hidup memang berat, tapi kamu tidak sendirian..."
+```
+
+#### 🎮 Kontrol Keyboard Visual Detection
+
+Untuk mode visual detection (`run_model.py`), gunakan keyboard:
 
 | Tombol | Mode            | Deskripsi                                |
 | ------ | --------------- | ---------------------------------------- |
@@ -294,12 +405,24 @@ Setelah menjalankan program, gunakan keyboard untuk mengontrol mode deteksi:
 
 **Model Architecture:**
 
+**Visual Models:**
+
 - **Face Model**: MobileNetV3-Large + Custom Classifier
 - **Pose Model**: MobileNetV3-Large + Custom Classifier
 - **Input Size**:
   - Face: 48x48 RGB
   - Pose: 224x224 RGB
 - **Output Classes**: 2 (KRISIS, TIDAK KRISIS)
+
+**Speech/Language Model:**
+
+- **Text Classifier**: LightGBM with TF-IDF features
+- **Vectorizer**: TfidfVectorizer (ngram_range=(1,2), max_features=10000)
+- **Features**: Sublinear TF, min_df=2, max_df=0.95
+- **Crisis Keywords**: 50+ Indonesian crisis keywords
+- **Threshold**: Optimized for high recall (crisis detection priority)
+- **Input**: Raw text (Indonesian language)
+- **Output**: 2 classes + confidence scores
 
 **Detection Pipeline:**
 
@@ -524,6 +647,48 @@ Gunakan notebook: `pose-recognition.ipynb`
 
 ---
 
+**Untuk Speech/Language Model**:
+
+Gunakan notebook: `listen_respon.ipynb`
+
+**Konfigurasi Training**:
+
+- Algorithm: LightGBM Classifier
+- Features: TF-IDF vectorization (1-2 grams, max 10k features)
+- Class weight: Balanced (untuk mengatasi imbalanced data)
+- Learning rate: 1.618e-2 (Golden ratio)
+- Max depth: 7
+- N estimators: 300
+- Data split: 80% training, 10% validation, 10% testing
+
+**Dataset Sources**:
+
+- Excel file: `data/csv/Data_tanggapan_positif.xlsx`
+- Sheet "Krisis": Kalimat-kalimat yang mengindikasikan krisis
+- Sheet "Tidak Krisis": Kalimat-kalimat normal/positif
+- Total samples: ~1000+ kalimat dalam Bahasa Indonesia
+
+**Text Preprocessing**:
+
+- Lowercase conversion
+- Remove special characters (keep alphanumeric + spaces)
+- Normalize whitespaces
+- Crisis keyword detection (50+ keywords)
+
+**Threshold Optimization**:
+
+- Grid search pada validation set (0.1 - 0.95)
+- Optimized untuk high recall (prioritas deteksi krisis)
+- Balanced precision untuk mengurangi false positive
+
+**Output Training**:
+
+- Vectorizer: `models/language/vectorizer.pkl`
+- Model: `models/language/lgbm_model.pkl`
+- Threshold: `models/language/threshold.txt`
+
+---
+
 **Training Workflow**:
 
 1. **Run Data Extraction**
@@ -538,9 +703,19 @@ Gunakan notebook: `pose-recognition.ipynb`
    - Output: `models/face-expression-directml-v2.pt`
 
 3. **Run Pose Training**
+
    - Buka `pose-recognition.ipynb`
    - Jalankan semua cell untuk melatih pose model
    - Output: `models/pose-recognition-directml-v2.pt`
+
+4. **Run Speech Model Training**
+   - Buka `listen_respon.ipynb`
+   - Pastikan file `data/csv/Data_tanggapan_positif.xlsx` tersedia
+   - Jalankan semua cell untuk training text classifier
+   - Output: `models/language/` directory dengan 3 files:
+     - `vectorizer.pkl` (TF-IDF vectorizer)
+     - `lgbm_model.pkl` (LightGBM classifier)
+     - `threshold.txt` (optimal threshold)
 
 ---
 
@@ -686,6 +861,16 @@ models/hef/
 - Throughput: ~125-200 images/second
 - Power: ~5W
 
+**Speech/Language Model**:
+
+- Input: Raw audio → Speech-to-Text → Text preprocessing
+- Text Features: TF-IDF vectors (10k max features, 1-2 grams)
+- Model: LightGBM classifier (300 estimators)
+- Output: 2 classes (krisis, tidak_krisis) dengan confidence scores
+- Latency: ~200-500ms per text prediction
+- Crisis Keywords: 50+ real-time keyword detection
+- Languages: Bahasa Indonesia (primary)
+
 **Deployment Checklist**:
 
 - ✓ HEF files generated successfully
@@ -699,6 +884,8 @@ models/hef/
 ---
 
 #### 📊 **Complete Model Training & Conversion Workflow**
+
+**Visual Models Pipeline:**
 
 ```
 ┌─────────────────────────────┐
@@ -743,6 +930,32 @@ models/hef/
 └─────────────────────────────┘
 ```
 
+**Speech/Language Model Pipeline:**
+
+```
+┌─────────────────────────────┐
+│ 1. Text Data Collection     │  (source: data/csv/)
+│    - Data_tanggapan_positif │
+│    - Krisis & Tidak Krisis  │
+└────────────┬────────────────┘
+             │ listen_respon.ipynb
+             ▼
+┌─────────────────────────────┐
+│ 2. Text Preprocessing       │  (~1000+ Indonesian sentences)
+│    - Lowercasing            │
+│    - Special char removal   │
+│    - Crisis keyword extract │
+└────────────┬────────────────┘
+             │ TF-IDF vectorization + LightGBM
+             ▼
+┌─────────────────────────────┐
+│ 3. Trained Language Model   │  (.pkl format)
+│    - vectorizer.pkl (TF-IDF)│
+│    - lgbm_model.pkl (LightGBM)│
+│    - threshold.txt (optimal)│
+└─────────────────────────────┘
+```
+
 ---
 
 ### 📓 Menggunakan Notebook untuk Analisis & Training
@@ -756,12 +969,28 @@ jupyter notebook face-expression.ipynb
 
 # 3. Pose Recognition Model Training
 jupyter notebook pose-recognition.ipynb
+
+# 4. Speech/Language Model Training
+jupyter notebook listen_respon.ipynb
 ```
 
 **Fitur Notebook**:
 
+**Visual Models (`extract_videos.ipynb`, `face-expression.ipynb`, `pose-recognition.ipynb`)**:
+
 - 📊 Visualisasi data training dan distribusi kelas
-- 🎓 Training loops dengan progress tracking
+- 🎓 Training loops dengan progress tracking PyTorch
+- 🖼️ Image augmentation dan preprocessing pipeline
+- 📈 Real-time loss/accuracy plotting
+- 💾 Model checkpoints dan best model saving
+
+**Speech Model (`listen_respon.ipynb`)**:
+
+- 📝 Text preprocessing dan TF-IDF feature extraction
+- 🔍 Crisis keyword analysis dan frequency distribution
+- ⚖️ Threshold optimization untuk balanced precision/recall
+- 📊 Classification report dengan confusion matrix
+- 💬 Interactive prediction testing dengan sample texts
 - 📈 Evaluasi performa model (accuracy, precision, recall, F1, ROC-AUC)
 - 🔍 Analisis confusion matrix
 - 🧪 Testing dengan gambar statis
